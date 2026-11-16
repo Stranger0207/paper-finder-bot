@@ -1,5 +1,7 @@
+from urllib.parse import quote
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from app.services.models import PaperItem
+from app.services.aggregator import clean_doi
 
 
 def build_paper_keyboard(paper: PaperItem) -> InlineKeyboardMarkup:
@@ -17,10 +19,13 @@ def build_paper_keyboard(paper: PaperItem) -> InlineKeyboardMarkup:
     ]
 
     link_row = []
-    if paper.landing_url and paper.landing_url.startswith("http"):
-        link_row.append(InlineKeyboardButton(text="🌐 صفحه مقاله", url=paper.landing_url))
+    if paper.landing_url and str(paper.landing_url).startswith("http"):
+        link_row.append(InlineKeyboardButton(text="🌐 صفحه مقاله", url=str(paper.landing_url)))
     if paper.doi:
-        link_row.append(InlineKeyboardButton(text="🔗 لینک DOI", url=f"https://doi.org/{paper.doi}"))
+        clean_d = clean_doi(paper.doi)
+        if clean_d:
+            encoded_doi = quote(clean_d, safe="")
+            link_row.append(InlineKeyboardButton(text="🔗 لینک DOI", url=f"https://doi.org/{encoded_doi}"))
 
     if link_row:
         buttons.append(link_row)

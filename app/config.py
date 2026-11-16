@@ -40,9 +40,49 @@ class Settings(BaseSettings):
         self.validate_credentials()
         return self
 
+    @property
+    def is_bot_token_valid(self) -> bool:
+        """Check if BOT_TOKEN is provided and not a placeholder."""
+        raw_token = (self.BOT_TOKEN or "").strip()
+        token_lower = raw_token.lower()
+        token_placeholders = [
+            "your_bot_token_here",
+            "your_telegram_bot_token_here",
+            "your_token_here",
+            "bot_token_here",
+            "1234567890:aah",
+            "dummy_token",
+            "placeholder",
+        ]
+        if not raw_token or any(p in token_lower for p in token_placeholders):
+            return False
+        return bool(re.match(r"^\d{8,11}:[A-Za-z0-9_-]{35,}$", raw_token))
+
+    @property
+    def is_unpaywall_email_valid(self) -> bool:
+        """Check if UNPAYWALL_EMAIL is provided and not a placeholder like example.com."""
+        raw_email = (self.UNPAYWALL_EMAIL or self.CONTACT_EMAIL or "").strip()
+        email_lower = raw_email.lower()
+        email_placeholders = [
+            "example.com",
+            "example.org",
+            "example.net",
+            "test.com",
+            "sample.com",
+            "your_email",
+            "researcher@example.com",
+            "your_email@gmail.com",
+            "your_email@example.com",
+            "user@example.com",
+        ]
+        if not raw_email or any(p in email_lower for p in email_placeholders):
+            return False
+        if "@" not in email_lower or "." not in email_lower.split("@")[-1]:
+            return False
+        return True
+
     def validate_credentials(self) -> None:
         """Validate BOT_TOKEN and UNPAYWALL_EMAIL/CONTACT_EMAIL against empty or default placeholder values."""
-        # --- Check BOT_TOKEN ---
         raw_token = (self.BOT_TOKEN or "").strip()
         token_lower = raw_token.lower()
         token_placeholders = [
@@ -71,27 +111,17 @@ class Settings(BaseSettings):
 
         # --- Check UNPAYWALL_EMAIL / CONTACT_EMAIL ---
         raw_email = (self.UNPAYWALL_EMAIL or self.CONTACT_EMAIL or "").strip()
-        email_lower = raw_email.lower()
-        email_placeholders = [
-            "example.com",
-            "example.org",
-            "example.net",
-            "your_email",
-            "researcher@example.com",
-            "your_email@gmail.com",
-            "your_email@example.com",
-        ]
-
-        if not raw_email:
-            logger.warning(
-                "⚠️ [CONFIG WARNING] UNPAYWALL_EMAIL / CONTACT_EMAIL is empty! "
-                "OpenAlex & Unpaywall APIs require an email for their polite pool (higher rate limits)."
-            )
-        elif any(p in email_lower for p in email_placeholders) or "@" not in email_lower or "." not in email_lower.split("@")[-1]:
-            logger.warning(
-                f"⚠️ [CONFIG WARNING] UNPAYWALL_EMAIL / CONTACT_EMAIL is set to a placeholder or invalid value ('{raw_email}'). "
-                "Please update it in your .env file with a real email to access OpenAlex & Unpaywall Polite Pool."
-            )
+        if not self.is_unpaywall_email_valid:
+            if not raw_email:
+                logger.warning(
+                    "⚠️ [CONFIG WARNING] UNPAYWALL_EMAIL / CONTACT_EMAIL is empty! "
+                    "OpenAlex & Unpaywall APIs require an email for their polite pool (higher rate limits)."
+                )
+            else:
+                logger.warning(
+                    f"⚠️ [CONFIG WARNING] UNPAYWALL_EMAIL / CONTACT_EMAIL is set to a placeholder or invalid value ('{raw_email}'). "
+                    "Please update it in your .env file with a real email to access OpenAlex & Unpaywall Polite Pool."
+                )
 
     @property
     def clean_proxy(self) -> Optional[str]:
