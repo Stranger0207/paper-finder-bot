@@ -36,17 +36,8 @@ EOF"
 sudo systemctl daemon-reload
 sudo systemctl enable --now paper-bot
 
-# Setup Git post-merge hook so 'git pull' automatically restarts the service
-HOOK_FILE="$DIR/.git/hooks/post-merge"
-mkdir -p "$DIR/.git/hooks"
-cat << 'EOF' > "$HOOK_FILE"
-#!/usr/bin/env bash
-echo "🔄 Auto-restarting paper-bot service after git pull..."
-sudo systemctl restart paper-bot
-echo "✅ paper-bot restarted successfully!"
-EOF
-chmod +x "$HOOK_FILE"
+# Remove any existing git hook
+rm -f "$DIR/.git/hooks/post-merge"
 
 echo "🎉 Setup complete! paper-bot is now running 24/7 as a background service."
-echo "🔄 Every time you run 'git pull', it will automatically restart!"
 sudo systemctl status paper-bot --no-pager
