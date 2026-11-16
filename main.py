@@ -31,7 +31,7 @@ async def start_healthcheck_server() -> web.AppRunner:
     await runner.setup()
     site = web.TCPSite(runner, host="0.0.0.0", port=settings.PORT)
     await site.start()
-    logger.info(f"Healthcheck server running on [http://0.0.0.0](http://0.0.0.0):{settings.PORT}")
+    logger.info(f"Healthcheck server running on http://0.0.0.0:{settings.PORT}")
     return runner
 
 

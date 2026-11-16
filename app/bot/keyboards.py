@@ -20,7 +20,7 @@ def build_paper_keyboard(paper: PaperItem) -> InlineKeyboardMarkup:
     if paper.landing_url and paper.landing_url.startswith("http"):
         link_row.append(InlineKeyboardButton(text="🌐 صفحه مقاله", url=paper.landing_url))
     if paper.doi:
-        link_row.append(InlineKeyboardButton(text="🔗 لینک DOI", url=f"[https://doi.org/](https://doi.org/){paper.doi}"))
+        link_row.append(InlineKeyboardButton(text="🔗 لینک DOI", url=f"https://doi.org/{paper.doi}"))
 
     if link_row:
         buttons.append(link_row)

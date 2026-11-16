@@ -37,7 +37,7 @@ def reconstruct_abstract(inverted_index: Optional[dict]) -> str:
 def clean_doi(raw_doi: Optional[str]) -> Optional[str]:
     if not raw_doi:
         return None
-    raw_doi = raw_doi.replace("[https://doi.org/](https://doi.org/)", "").replace("[http://doi.org/](http://doi.org/)", "").strip()
+    raw_doi = raw_doi.replace("https://doi.org/", "").replace("http://doi.org/", "").strip()
     match = DOI_REGEX.search(raw_doi)
     return match.group(1) if match else None
 
@@ -99,7 +99,7 @@ class PaperAggregator:
         )
 
     async def search_openalex(self, query: str, limit: int = 4) -> list[PaperItem]:
-        url = "[https://api.openalex.org/works](https://api.openalex.org/works)"
+        url = "https://api.openalex.org/works"
         params = {
             "search": query,
             "per-page": limit,
@@ -120,14 +120,14 @@ class PaperAggregator:
         return results
 
     async def search_arxiv(self, query: str, limit: int = 3) -> list[PaperItem]:
-        url = f"[http://export.arxiv.org/api/query?search_query=all](http://export.arxiv.org/api/query?search_query=all):{quote(query)}&start=0&max_results={limit}"
+        url = f"http://export.arxiv.org/api/query?search_query=all:{quote(query)}&start=0&max_results={limit}"
         results = []
         try:
             async with self._get_httpx_client() as client:
                 resp = await client.get(url)
                 if resp.status_code == 200:
                     root = ET.fromstring(resp.text)
-                    ns = {"atom": "[http://www.w3.org/2005/Atom](http://www.w3.org/2005/Atom)", "arxiv": "[http://arxiv.org/schemas/atom](http://arxiv.org/schemas/atom)"}
+                    ns = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
                     for entry in root.findall("atom:entry", ns):
                         title_el = entry.find("atom:title", ns)
                         if title_el is None or not title_el.text:
@@ -171,7 +171,7 @@ class PaperAggregator:
         return results
 
     async def search_semantic_scholar(self, query: str, limit: int = 3) -> list[PaperItem]:
-        url = "[https://api.semanticscholar.org/graph/v1/paper/search](https://api.semanticscholar.org/graph/v1/paper/search)"
+        url = "https://api.semanticscholar.org/graph/v1/paper/search"
         params = {
             "query": query,
             "limit": limit,
@@ -223,13 +223,13 @@ class PaperAggregator:
         pmid_match = PMID_REGEX.match(identifier)
 
         if doi_match:
-            lookup_path = f"[https://doi.org/](https://doi.org/){doi_match.group(1)}"
+            lookup_path = f"https://doi.org/{doi_match.group(1)}"
         elif pmid_match:
             lookup_path = f"pmid:{pmid_match.group(1)}"
         else:
             return None
 
-        url = f"[https://api.openalex.org/works/](https://api.openalex.org/works/){lookup_path}"
+        url = f"https://api.openalex.org/works/{lookup_path}"
         try:
             async with self._get_httpx_client() as client:
                 resp = await client.get(url, params={"mailto": settings.CONTACT_EMAIL})
@@ -268,7 +268,7 @@ class PaperAggregator:
 
     async def resolve_unpaywall_pdf(self, doi: str) -> Optional[str]:
         """Resolve free Open Access PDF via official Unpaywall API."""
-        url = f"[https://api.unpaywall.org/v2/](https://api.unpaywall.org/v2/){quote(doi)}"
+        url = f"https://api.unpaywall.org/v2/{quote(doi)}"
         try:
             async with self._get_httpx_client() as client:
                 resp = await client.get(url, params={"email": settings.CONTACT_EMAIL})

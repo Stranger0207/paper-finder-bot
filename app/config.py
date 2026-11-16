@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     BOT_TOKEN: str
     CONTACT_EMAIL: str = "researcher@example.com"
     TELEGRAM_PROXY: Optional[str] = None
-    FALLBACK_MIRRORS: str = "[https://sci-hub.se](https://sci-hub.se),[https://sci-hub.st](https://sci-hub.st),[https://sci-hub.ru](https://sci-hub.ru)"
+    FALLBACK_MIRRORS: str = "https://sci-hub.se,https://sci-hub.st,https://sci-hub.ru"
     PORT: int = 7860
     DB_PATH: str = str(DATA_DIR / "bot_cache.db")
     MAX_RESULTS: int = 5
