@@ -10,7 +10,10 @@ from urllib.parse import quote
 from aiogram import Router, F
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery, BufferedInputFile
+from aiogram.types import (
+    Message, CallbackQuery, BufferedInputFile,
+    InlineKeyboardMarkup, InlineKeyboardButton
+)
 
 from app.config import settings
 from app.database import db
@@ -189,6 +192,47 @@ def format_papers_list_message(
     return full_text[:3800]
 
 
+# ── Subscription Access Verification ──────────────────────────────────
+
+PREMIUM_PROMO_TEXT = (
+    "💎 <b>این قابلیت مخصوص کاربران دارای اشتراک ویژه است!</b>\n\n"
+    "✨ <b>با خرید اشتراک ویژه یکماهه (۵۰,۰۰۰ تومان)، به امکانات زیر دسترسی کامل خواهید داشت:</b>\n"
+    "• 🔍 مشاهده و جستجوی نتایج بیشتر از ۲۰ مقاله\n"
+    "• ⭐️ ذخیره مقالات در کتابخانه شخصی\n"
+    "• 🕸 دسترسی به مقالات مشابه\n"
+    "• 📎 دریافت رفرنس استاندارد (APA, IEEE, Vancouver, BibTeX, RIS)\n"
+    "• 🇮🇷 ترجمه نامحدود چکیده مقالات به فارسی روان\n\n"
+    "💳 <b>شماره کارت واریز:</b> <code>6219861843148577</code> (به نام رضایی - بلوبانک)\n"
+    "💵 <b>مبلغ:</b> ۵۰,۰۰۰ تومان (۳۰ روزه)\n\n"
+    "📌 پس از واریز، روی دکمه زیر بزنید و رسید خود را ارسال کنید:"
+)
+
+
+def build_premium_promo_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📤 ارسال رسید پرداخت", callback_data="send_receipt_guide")],
+        [InlineKeyboardButton(text="💳 خرید اشتراک ویژه", callback_data="buy_sub")]
+    ])
+
+
+async def check_premium_access(event: Union[CallbackQuery, Message]) -> bool:
+    """Check if user has active premium subscription; if not, show promo and return False."""
+    user = event.from_user
+    if not user:
+        return False
+    is_prem = await db.is_user_premium(user.id)
+    if not is_prem:
+        kb = build_premium_promo_keyboard()
+        if isinstance(event, CallbackQuery):
+            await event.answer("❌ نیاز به اشتراک ویژه", show_alert=True)
+            if event.message:
+                await event.message.answer(PREMIUM_PROMO_TEXT, reply_markup=kb)
+        else:
+            await event.answer(PREMIUM_PROMO_TEXT, reply_markup=kb)
+        return False
+    return True
+
+
 # ── Command Handlers ─────────────────────────────────────────────────
 
 @router.message(CommandStart())
@@ -261,6 +305,8 @@ async def cmd_stats(message: Message):
 async def cmd_saved(message: Message):
     if not message.from_user:
         return
+    if not await check_premium_access(message):
+        return
     papers = await db.get_user_bookmarks(message.from_user.id)
     if not papers:
         await safe_send_message(
@@ -285,22 +331,7 @@ async def cmd_saved(message: Message):
 
 # ── Subscription & Payment Verification Handlers ──────────────────────
 
-SUBSCRIPTION_TEXT = (
-    "💎 <b>خرید اشتراک ویژه مقاله‌یاب (یک‌ماهه)</b>\n\n"
-    "با خرید اشتراک ویژه، به قابلیت‌های پیشرفته و اختصاصی زیر دسترسی کامل خواهید داشت:\n\n"
-    "✨ <b>آپشن‌های اشتراک ویژه:</b>\n"
-    "• 🇮🇷 <b>ترجمه نامحدود چکیده مقالات</b> به زبان فارسی روان\n"
-    "• 🚀 <b>اولویت بالاتر در پردازش و جستجوی مقالات</b> در پایگاه‌های علمی\n"
-    "• 📥 <b>دسترسی نامحدود به ابزارها و خروجی‌های پیشرفته</b>\n\n"
-    "⏳ <b>مدت اعتبار:</b> ۳۰ روز (یک‌ماهه)\n"
-    "💰 <b>مبلغ سرمایه‌گذاری:</b> ۵۰,۰۰۰ تومان\n"
-    "💳 <b>شماره کارت:</b> <code>6219861843148577</code>\n"
-    "👤 <b>به نام:</b> رضایی (بلوبانک)\n\n"
-    "📌 <b>راهنمای فعال‌سازی:</b>\n"
-    "۱. مبلغ ۵۰,۰۰۰ تومان را به کارت بالا واریز کنید.\n"
-    "۲. روی دکمه <b>«📤 ارسال رسید پرداخت»</b> زیر بزنید.\n"
-    "۳. عکس یا فایل رسید واریزی خود را ارسال کنید تا برای تیم پشتیبانی جهت بررسی ارسال شود."
-)
+SUBSCRIPTION_TEXT = PREMIUM_PROMO_TEXT
 
 
 @router.message(Command("subscribe"))
@@ -337,13 +368,13 @@ async def handle_check_sub_status(callback: CallbackQuery):
         status_text = (
             "💎 <b>وضعیت اشتراک: فعال (ویژه)</b>\n\n"
             f"⏳ <b>تاریخ انقضا:</b> {exp_text}\n\n"
-            "✨ هم‌اکنون به تمامی قابلیت‌های ویژه از جمله <b>ترجمه نامحدود چکیده مقالات</b> دسترسی کامل دارید!"
+            "✨ هم‌اکنون به تمامی ۵ قابلیت ویژه (مشاهده بیش از ۲۰ نتیجه، ذخیره مقالات، مقالات مشابه، دریافت رفرنس و ترجمه فارسی) دسترسی کامل دارید!"
         )
     else:
         status_text = (
             "📊 <b>وضعیت اشتراک: عادی (رایگان)</b>\n\n"
             "❌ شما در حال حاضر اشتراک ویژه فعال ندارید.\n\n"
-            "برای فعال‌سازی و دسترسی به قابلیت‌های ویژه (ترجمه روان چکیده به فارسی، اولویت در جستجو و دانلود) روی دکمه <b>«💳 خرید اشتراک ویژه»</b> کلیک کنید."
+            "برای فعال‌سازی و دسترسی به ۵ قابلیت ویژه (مشاهده بیش از ۲۰ نتیجه، ذخیره مقالات، مقالات مشابه، رفرنس‌دهی و ترجمه فارسی چکیده) روی دکمه <b>«💳 خرید اشتراک ویژه»</b> کلیک کنید."
         )
     await safe_send_message(callback.message, status_text, reply_markup=build_subscription_keyboard())
 
@@ -429,7 +460,7 @@ async def handle_admin_accept(callback: CallbackQuery):
             chat_id=user_id,
             text=(
                 "🎉 <b>پرداخت شما تایید شد!</b>\n\n"
-                "اشتراک ویژه یک‌ماهه شما با موفقیت فعال گردید. هم اکنون می‌توانید از قابلیت ترجمه چکیده مقالات استفاده کنید."
+                "اشتراک ویژه یک‌ماهه (۳۰ روزه) شما با موفقیت فعال گردید. هم‌اکنون به تمامی امکانات ویژه (مشاهده بیش از ۲۰ نتیجه، ذخیره مقالات، مقالات مشابه، دریافت رفرنس و ترجمه روان چکیده به فارسی) دسترسی کامل دارید."
             )
         )
     except Exception as e:
@@ -613,6 +644,10 @@ async def handle_unknown_command(message: Message):
 
 @router.callback_query(F.data.startswith("more:"))
 async def handle_more_results_callback(callback: CallbackQuery):
+    if not callback.from_user:
+        return
+    if not await check_premium_access(callback):
+        return
     await callback.answer()
 
     parts = callback.data.split(":")
@@ -814,20 +849,7 @@ async def handle_translate_callback(callback: CallbackQuery):
         return
 
     # Check premium subscription
-    is_prem = await db.is_user_premium(callback.from_user.id)
-    if not is_prem:
-        await callback.answer("❌ این قابلیت مخصوص کاربران دارای اشتراک ویژه است.", show_alert=True)
-        sub_promo = (
-            "🔒 <b>قابلیت ترجمه هوشمند مخصوص کاربران دارای اشتراک ویژه است!</b>\n\n"
-            "با خرید اشتراک ویژه یک‌ماهه (۵۰,۰۰۰ تومان)، به امکانات اختصاصی زیر دسترسی کامل خواهید داشت:\n\n"
-            "✨ <b>آپشن‌های اشتراک ویژه:</b>\n"
-            "• 🇮🇷 <b>ترجمه نامحدود چکیده مقالات</b> به زبان فارسی روان\n"
-            "• 🚀 <b>اولویت بالاتر در پردازش و جستجوی مقالات</b> در پایگاه‌های علمی\n"
-            "• 📥 <b>دسترسی نامحدود به ابزارها و خروجی‌های پیشرفته</b>\n\n"
-            "برای فعال‌سازی و خرید اشتراک، روی دکمه زیر کلیک کنید:"
-        )
-        if callback.message:
-            await safe_send_message(callback.message, sub_promo, reply_markup=build_subscription_keyboard())
+    if not await check_premium_access(callback):
         return
 
     await callback.answer("🇮🇷 در حال ترجمه چکیده به فارسی...")
@@ -880,6 +902,12 @@ async def handle_translate_callback(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("cite:"))
 async def handle_cite_callback(callback: CallbackQuery):
     """Handle citation/reference generation."""
+    if not callback.from_user:
+        return
+
+    if not await check_premium_access(callback):
+        return
+
     await callback.answer()
 
     parts = callback.data.split(":", 1)
@@ -913,6 +941,12 @@ async def handle_cite_callback(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("dlbib:"))
 async def handle_download_bibtex_callback(callback: CallbackQuery):
     """Handle BibTeX file download."""
+    if not callback.from_user:
+        return
+
+    if not await check_premium_access(callback):
+        return
+
     await callback.answer("📥 در حال ساخت فایل BibTeX...")
 
     parts = callback.data.split(":", 1)
@@ -939,6 +973,12 @@ async def handle_download_bibtex_callback(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("dlris:"))
 async def handle_download_ris_callback(callback: CallbackQuery):
     """Handle RIS file download."""
+    if not callback.from_user:
+        return
+
+    if not await check_premium_access(callback):
+        return
+
     await callback.answer("📥 در حال ساخت فایل RIS...")
 
     parts = callback.data.split(":", 1)
@@ -965,6 +1005,12 @@ async def handle_download_ris_callback(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("relp:"))
 async def handle_related_papers_callback(callback: CallbackQuery):
     """Handle related papers discovery."""
+    if not callback.from_user:
+        return
+
+    if not await check_premium_access(callback):
+        return
+
     await callback.answer("🕸 در حال جستجوی مقالات مشابه...")
 
     parts = callback.data.split(":", 1)
@@ -1019,8 +1065,14 @@ async def handle_related_papers_callback(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("save:"))
 async def handle_save_callback(callback: CallbackQuery):
     """Handle bookmark toggle."""
+    if not callback.from_user:
+        return
+
+    if not await check_premium_access(callback):
+        return
+
     parts = callback.data.split(":", 1)
-    if len(parts) < 2 or not callback.from_user:
+    if len(parts) < 2:
         await callback.answer()
         return
 
@@ -1053,10 +1105,13 @@ async def handle_save_callback(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("exp:"))
 async def handle_export_callback(callback: CallbackQuery):
     """Handle library export (CSV, BibTeX, RIS) and clear."""
-    await callback.answer()
-
     if not callback.from_user:
         return
+
+    if not await check_premium_access(callback):
+        return
+
+    await callback.answer()
 
     parts = callback.data.split(":", 1)
     if len(parts) < 2:

@@ -1078,7 +1078,7 @@ class PaperAggregator:
         return None
 
     async def translate_to_persian(self, text: str) -> Optional[str]:
-        """Translate text to Persian using Google Translate free endpoint."""
+        """Translate text to Persian using reliable public translation API."""
         if not text or not text.strip():
             return None
         url = "https://translate.googleapis.com/translate_a/single"
@@ -1087,16 +1087,20 @@ class PaperAggregator:
             "sl": "auto",
             "tl": "fa",
             "dt": "t",
-            "q": text[:2500]
+            "q": text[:2000]
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
         try:
-            async with self._get_httpx_client() as client:
-                resp = await client.get(url, params=params)
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, proxy=settings.clean_proxy) as client:
+                resp = await client.get(url, params=params, headers=headers)
                 if resp.status_code == 200:
                     data = resp.json()
                     if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
-                        translated_parts = [part[0] for part in data[0] if isinstance(part, list) and len(part) > 0 and part[0]]
-                        return "".join(translated_parts).strip()
+                        parts = [item[0] for item in data[0] if isinstance(item, list) and len(item) > 0 and item[0]]
+                        translated = "".join(parts).strip()
+                        return translated if translated else None
         except Exception as e:
             logger.warning(f"Translation error: {e}")
         return None
