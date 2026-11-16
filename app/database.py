@@ -43,6 +43,14 @@ class Database:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS search_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    query TEXT,
+                    last_page INTEGER DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
             await db.commit()
 
     async def register_or_update_user(self, user_id: int, username: Optional[str], full_name: str):
@@ -105,6 +113,29 @@ class Database:
                 )
                 paper.short_id = row["short_id"]
                 return paper
+
+    async def save_search_session(self, session_id: str, query: str, page: int = 1):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                INSERT OR REPLACE INTO search_sessions (session_id, query, last_page)
+                VALUES (?, ?, ?)
+            """, (session_id, query, page))
+            await db.commit()
+
+    async def get_search_session(self, session_id: str) -> Optional[dict]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM search_sessions WHERE session_id = ?", (session_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    return None
+                return {
+                    "session_id": row["session_id"],
+                    "query": row["query"],
+                    "last_page": row["last_page"]
+                }
 
     async def get_user_stats(self, user_id: int) -> dict:
         async with aiosqlite.connect(self.db_path) as db:

@@ -98,11 +98,12 @@ class PaperAggregator:
             citation_count=citations
         )
 
-    async def search_openalex(self, query: str, limit: int = 4) -> list[PaperItem]:
+    async def search_openalex(self, query: str, limit: int = 14, page: int = 1) -> list[PaperItem]:
         url = "https://api.openalex.org/works"
         params = {
             "search": query,
             "per-page": limit,
+            "page": page,
             "mailto": settings.CONTACT_EMAIL
         }
         results = []
@@ -119,8 +120,9 @@ class PaperAggregator:
             logger.warning(f"OpenAlex search error: {e}")
         return results
 
-    async def search_arxiv(self, query: str, limit: int = 3) -> list[PaperItem]:
-        url = f"http://export.arxiv.org/api/query?search_query=all:{quote(query)}&start=0&max_results={limit}"
+    async def search_arxiv(self, query: str, limit: int = 6, page: int = 1) -> list[PaperItem]:
+        start = max(0, (page - 1) * limit)
+        url = f"http://export.arxiv.org/api/query?search_query=all:{quote(query)}&start={start}&max_results={limit}"
         results = []
         try:
             async with self._get_httpx_client() as client:
@@ -170,11 +172,13 @@ class PaperAggregator:
             logger.warning(f"arXiv search error: {e}")
         return results
 
-    async def search_semantic_scholar(self, query: str, limit: int = 3) -> list[PaperItem]:
+    async def search_semantic_scholar(self, query: str, limit: int = 6, page: int = 1) -> list[PaperItem]:
         url = "https://api.semanticscholar.org/graph/v1/paper/search"
+        offset = max(0, (page - 1) * limit)
         params = {
             "query": query,
             "limit": limit,
+            "offset": offset,
             "fields": "title,authors,year,venue,abstract,externalIds,openAccessPdf,citationCount,url"
         }
         results = []
@@ -241,15 +245,16 @@ class PaperAggregator:
             logger.warning(f"Direct lookup failed for {identifier}: {e}")
         return None
 
-    async def search_papers(self, query: str) -> list[PaperItem]:
+    async def search_papers(self, query: str, page: int = 1, page_size: int = settings.MAX_RESULTS) -> list[PaperItem]:
         """Aggregate search across OpenAlex, arXiv, and Semantic Scholar or direct ID lookup."""
-        direct_paper = await self.lookup_by_identifier(query)
-        if direct_paper:
-            return [direct_paper]
+        if page == 1:
+            direct_paper = await self.lookup_by_identifier(query)
+            if direct_paper:
+                return [direct_paper]
 
-        oa_task = self.search_openalex(query, limit=3)
-        arxiv_task = self.search_arxiv(query, limit=2)
-        s2_task = self.search_semantic_scholar(query, limit=2)
+        oa_task = self.search_openalex(query, limit=14, page=page)
+        arxiv_task = self.search_arxiv(query, limit=6, page=page)
+        s2_task = self.search_semantic_scholar(query, limit=6, page=page)
 
         oa_res, arxiv_res, s2_res = await asyncio.gather(oa_task, arxiv_task, s2_task)
 
@@ -261,7 +266,7 @@ class PaperAggregator:
             if dedup_key not in seen_keys:
                 seen_keys.add(dedup_key)
                 combined.append(paper)
-            if len(combined) >= settings.MAX_RESULTS:
+            if len(combined) >= page_size:
                 break
 
         return combined
@@ -290,6 +295,26 @@ class PaperAggregator:
                     if resp.status_code != 200:
                         continue
                     html_text = resp.text
+
+                    # 1. Meta tag with PDF URL (Sci-Hub modern format)
+                    meta_match = re.search(
+                        r'<meta\s+[^>]*content=["\']([^"\']+\.pdf[^"\']*)["\']',
+                        html_text,
+                        re.IGNORECASE
+                    )
+                    if not meta_match:
+                        meta_match = re.search(
+                            r'<meta\s+[^>]*(?:citation_pdf_url|pdf_url)[^>]*content=["\']([^"\']+)["\']',
+                            html_text,
+                            re.IGNORECASE
+                        )
+                    if meta_match:
+                        raw_link = meta_match.group(1).split("#")[0]
+                        if raw_link.startswith("//"):
+                            return "https:" + raw_link
+                        return urljoin(mirror, raw_link)
+
+                    # 2. iframe / embed src
                     match = re.search(
                         r'(?:iframe|embed)[^>]+src=["\']([^"\']+\.pdf[^"\']*)["\']',
                         html_text,
@@ -298,6 +323,12 @@ class PaperAggregator:
                     if not match:
                         match = re.search(
                             r'location\.href\s*=\s*["\']([^"\']+\.pdf[^"\']*)["\']',
+                            html_text,
+                            re.IGNORECASE
+                        )
+                    if not match:
+                        match = re.search(
+                            r'href=["\']([^"\']+\.pdf[^"\']*)["\']',
                             html_text,
                             re.IGNORECASE
                         )

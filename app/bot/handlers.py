@@ -1,8 +1,11 @@
+import asyncio
+import hashlib
 import html
 import re
+from urllib.parse import quote
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery, BufferedInputFile
+from aiogram.types import Message, CallbackQuery, BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 
 from app.config import settings
 from app.database import db
@@ -87,7 +90,7 @@ async def handle_search_query(message: Message):
 
     status_msg = await message.answer("🔍 در حال جستجو در پایگاههای علمی (OpenAlex, arXiv, Semantic Scholar)...")
 
-    papers = await aggregator.search_papers(query)
+    papers = await aggregator.search_papers(query, page=1, page_size=settings.MAX_RESULTS)
     if not papers:
         await status_msg.edit_text(
             "❌ مقالهای با این مشخصات یافت نشد.\n"
@@ -102,6 +105,71 @@ async def handle_search_query(message: Message):
         card_html = format_paper_card(paper, idx)
         kb = build_paper_keyboard(paper)
         await message.answer(card_html, reply_markup=kb, disable_web_page_preview=True)
+        await asyncio.sleep(0.04)
+
+    if len(papers) >= settings.MAX_RESULTS:
+        session_id = hashlib.sha256(query.strip().lower().encode("utf-8")).hexdigest()[:10]
+        await db.save_search_session(session_id, query, page=1)
+        prompt_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ بله، نمایش ۲۰ نتیجه بیشتر", callback_data=f"more:{session_id}:2")]
+        ])
+        await message.answer(
+            f"📋 <b>نمایش ۲۰ نتیجه برتر اول به پایان رسید.</b>\n\n"
+            f"🔍 آیا مایلید <b>۲۰ مقاله بعدی</b> درباره «<code>{html.escape(query[:40])}</code>» نمایش داده شوند؟",
+            reply_markup=prompt_kb
+        )
+
+
+@router.callback_query(F.data.startswith("more:"))
+async def handle_more_results_callback(callback: CallbackQuery):
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("خطای درخواست", show_alert=True)
+        return
+    session_id = parts[1]
+    target_page = int(parts[2])
+
+    session = await db.get_search_session(session_id)
+    if not session:
+        await callback.answer("⚠️ مهلت این جستجو منقضی شده است. لطفاً مجدداً موضوع را جستجو کنید.", show_alert=True)
+        return
+
+    query = session["query"]
+    await callback.answer(f"⏳ در حال استعلام صفحه {target_page}...")
+
+    await callback.message.edit_text(
+        f"⏳ در حال جستجو و دریافت ۲۰ مقاله بعدی (صفحه {target_page}) برای «<code>{html.escape(query[:40])}</code>»..."
+    )
+
+    papers = await aggregator.search_papers(query, page=target_page, page_size=settings.MAX_RESULTS)
+    if not papers:
+        await callback.message.edit_text(
+            f"🏁 نتیجه بیشتری در پایگاه‌های علمی برای «<code>{html.escape(query[:40])}</code>» یافت نشد."
+        )
+        return
+
+    await callback.message.delete()
+
+    start_idx = (target_page - 1) * settings.MAX_RESULTS + 1
+    for idx, paper in enumerate(papers, start=start_idx):
+        await db.save_paper(paper)
+        card_html = format_paper_card(paper, idx)
+        kb = build_paper_keyboard(paper)
+        await callback.message.answer(card_html, reply_markup=kb, disable_web_page_preview=True)
+        await asyncio.sleep(0.04)
+
+    if len(papers) >= settings.MAX_RESULTS:
+        await db.save_search_session(session_id, query, page=target_page)
+        next_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ بله، نمایش ۲۰ نتیجه بیشتر", callback_data=f"more:{session_id}:{target_page + 1}")]
+        ])
+        await callback.message.answer(
+            f"📋 <b>نمایش نتایج صفحه {target_page} به پایان رسید.</b>\n\n"
+            f"🔍 آیا مایلید <b>۲۰ مقاله بعدی</b> (صفحه {target_page + 1}) نمایش داده شوند؟",
+            reply_markup=next_kb
+        )
+    else:
+        await callback.message.answer("🏁 به انتهای نتایج این جستجو رسیدید.")
 
 
 @router.callback_query(F.data.startswith("abs:"))
@@ -143,11 +211,15 @@ async def handle_pdf_callback(callback: CallbackQuery):
     if not pdf_url:
         fallback_links = []
         if paper.doi:
-            for idx, mirror in enumerate(settings.mirrors_list, start=1):
-                fallback_links.append(f"🔗 <a href='{mirror}/{html.escape(paper.doi)}'>لینک کمکی آینه {idx}</a>")
+            clean_doi_str = html.escape(paper.doi)
+            fallback_links.append(f"🔗 <a href='https://sci-hub.ru/{clean_doi_str}'>دانلود از آینه Sci-Hub ۱ (روسیه)</a>")
+            fallback_links.append(f"🔗 <a href='https://sci-hub.st/{clean_doi_str}'>دانلود از آینه Sci-Hub ۲</a>")
+            fallback_links.append(f"🔗 <a href='https://annas-archive.org/scidb/{clean_doi_str}'>دانلود از آرشیو آنا (Anna's Archive)</a>")
+            fallback_links.append(f"🌐 <a href='https://doi.org/{clean_doi_str}'>صفحه اصلی در سایت ناشر (DOI)</a>")
         extra_msg = "\n".join(fallback_links) if fallback_links else ""
         await wait_msg.edit_text(
-            f"❌ متأسفانه نسخه PDF مستقیم برای این مقاله به صورت باز یافت نشد.\n\n{extra_msg}",
+            f"❌ متأسفانه نسخه رایگان با دسترسی باز برای این مقاله یافت نشد.\n\n"
+            f"💡 می‌توانید از لینک‌های کمکی زیر برای دریافت مستقیم مقاله استفاده کنید:\n\n{extra_msg}",
             disable_web_page_preview=True
         )
         return
