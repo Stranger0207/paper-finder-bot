@@ -15,7 +15,10 @@ from app.services.models import PaperItem
 logger = logging.getLogger(__name__)
 
 DOI_REGEX = re.compile(r"(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)", re.IGNORECASE)
-ARXIV_REGEX = re.compile(r"(?:arxiv\.org/(?:abs|pdf)/|arxiv:)?(\d{4}\.\d{4,5}(?:v\d+)?)(?:\.pdf)?", re.IGNORECASE)
+ARXIV_REGEX = re.compile(
+    r"(?:arxiv\.org/(?:abs|pdf)/|arxiv:)?((?:\d{4}\.\d{4,5}|[a-zA-Z\-]+(?:\.[a-zA-Z\-]+)?/\d{7})(?:v\d+)?)(?:\.pdf)?",
+    re.IGNORECASE
+)
 PMID_REGEX = re.compile(r"^(?:pmid:?\s*)?(\d{7,9})$", re.IGNORECASE)
 
 MAX_PDF_DOWNLOAD_BYTES = 50 * 1024 * 1024  # 50 MB limit
@@ -289,7 +292,7 @@ class PaperAggregator:
                     pdf_url = str(candidate).strip()
                     break
 
-        landing_url = item.get("URL") or (f"https://doi.org/{quote(doi, safe='')}" if doi else None)
+        landing_url = item.get("URL") or (f"https://doi.org/{quote(doi, safe='/')}" if doi else None)
 
         return PaperItem(
             title=title,
@@ -352,19 +355,21 @@ class PaperAggregator:
         return results
 
     async def search_arxiv(self, query: str, limit: int = 6, page: int = 1) -> list[PaperItem]:
-        """Search arXiv API with sanitized query handling special characters."""
+        """Search arXiv API with sanitized query handling special characters or direct id_list."""
         start = max(0, (page - 1) * limit)
 
-        # Sanitize query to prevent breaking arXiv query syntax
+        # Handle direct id: query using official id_list parameter
         if query.startswith("id:"):
-            clean_q = query.strip()
+            raw_id = query[3:].strip()
+            clean_id = clean_arxiv_id(raw_id) or raw_id
+            url = f"https://export.arxiv.org/api/query?id_list={quote(clean_id)}&start={start}&max_results={limit}"
         else:
             clean_q = re.sub(r"[^\w\s-]", " ", query)
             clean_q = re.sub(r"\s+", " ", clean_q).strip()
             if not clean_q:
                 clean_q = query.strip()
+            url = f"https://export.arxiv.org/api/query?search_query=all:{quote(clean_q)}&start={start}&max_results={limit}"
 
-        url = f"https://export.arxiv.org/api/query?search_query=all:{quote(clean_q)}&start={start}&max_results={limit}"
         results = []
         try:
             async with self._get_httpx_client() as client:
@@ -474,8 +479,8 @@ class PaperAggregator:
         pmid_match = PMID_REGEX.match(identifier)
 
         if clean_d:
-            # Quote DOI in API URL
-            encoded_doi = quote(clean_d, safe="")
+            # Quote DOI in API URL with safe="/"
+            encoded_doi = quote(clean_d, safe="/")
             lookup_path = f"https://doi.org/{encoded_doi}"
         elif pmid_match:
             lookup_path = f"pmid:{pmid_match.group(1)}"
@@ -610,7 +615,7 @@ class PaperAggregator:
         clean_d = clean_doi(doi)
         if not clean_d:
             return None
-        encoded_doi = quote(clean_d, safe="")
+        encoded_doi = quote(clean_d, safe="/")
 
         for mirror in settings.mirrors_list:
             target_url = f"{mirror}/{encoded_doi}"
@@ -668,9 +673,32 @@ class PaperAggregator:
                 logger.debug(f"Mirror {mirror} failed for {doi}: {e}")
         return None
 
+    async def get_candidate_pdf_urls(self, paper: PaperItem) -> list[str]:
+        """
+        Return candidate PDF URLs in priority order:
+        1. paper.pdf_url
+        2. Unpaywall (if DOI exists)
+        3. Fallback mirrors / Sci-Hub (if DOI exists)
+        """
+        candidates: list[str] = []
+        if paper.pdf_url and str(paper.pdf_url).startswith("http"):
+            candidates.append(str(paper.pdf_url).strip())
+
+        if paper.doi:
+            unpaywall_url = await self.resolve_unpaywall_pdf(paper.doi)
+            if unpaywall_url and unpaywall_url not in candidates:
+                candidates.append(unpaywall_url)
+
+            mirror_url = await self.resolve_fallback_mirror_pdf(paper.doi)
+            if mirror_url and mirror_url not in candidates:
+                candidates.append(mirror_url)
+
+        return candidates
+
     async def get_best_pdf_url(self, paper: PaperItem) -> Optional[str]:
-        if paper.pdf_url and paper.pdf_url.startswith("http"):
-            return paper.pdf_url
+        """Return the first candidate PDF URL found in priority order without verifying download."""
+        if paper.pdf_url and str(paper.pdf_url).startswith("http"):
+            return str(paper.pdf_url).strip()
 
         if paper.doi:
             unpaywall_url = await self.resolve_unpaywall_pdf(paper.doi)
@@ -682,6 +710,53 @@ class PaperAggregator:
                 return mirror_url
 
         return None
+
+    async def download_paper_pdf(self, paper: PaperItem) -> tuple[Optional[bytes], Optional[str]]:
+        """
+        Attempt to download PDF for paper checking candidates in priority order:
+        1. paper.pdf_url
+        2. Unpaywall (if DOI exists)
+        3. Fallback mirrors / Sci-Hub (if DOI exists)
+
+        Returns (pdf_bytes, final_url) if successfully downloaded and valid %PDF.
+        If all downloads fail, returns (None, best_candidate_url).
+        """
+        best_candidate: Optional[str] = None
+
+        # 1. Primary candidate: paper.pdf_url
+        if paper.pdf_url and str(paper.pdf_url).startswith("http"):
+            cand = str(paper.pdf_url).strip()
+            best_candidate = cand
+            logger.info(f"Attempting PDF download from paper.pdf_url: {cand}")
+            pdf_bytes = await self.download_pdf_bytes(cand)
+            if pdf_bytes:
+                return pdf_bytes, cand
+            logger.info("Download from paper.pdf_url failed or was not valid PDF. Trying Unpaywall fallback...")
+
+        # 2. Secondary candidate: Unpaywall (if DOI present)
+        if paper.doi:
+            unpaywall_url = await self.resolve_unpaywall_pdf(paper.doi)
+            if unpaywall_url and unpaywall_url != best_candidate:
+                if not best_candidate:
+                    best_candidate = unpaywall_url
+                logger.info(f"Attempting PDF download from Unpaywall: {unpaywall_url}")
+                pdf_bytes = await self.download_pdf_bytes(unpaywall_url)
+                if pdf_bytes:
+                    return pdf_bytes, unpaywall_url
+                logger.info("Download from Unpaywall failed. Trying Sci-Hub mirrors fallback...")
+
+            # 3. Tertiary candidate: Sci-Hub fallback mirrors (if DOI present)
+            mirror_url = await self.resolve_fallback_mirror_pdf(paper.doi)
+            if mirror_url and mirror_url != best_candidate:
+                if not best_candidate:
+                    best_candidate = mirror_url
+                logger.info(f"Attempting PDF download from fallback mirror: {mirror_url}")
+                pdf_bytes = await self.download_pdf_bytes(mirror_url)
+                if pdf_bytes:
+                    return pdf_bytes, mirror_url
+                logger.info("Download from fallback mirrors failed.")
+
+        return None, best_candidate
 
     async def download_pdf_bytes(self, pdf_url: str) -> Optional[bytes]:
         """Download PDF bytes with total=90s, sock_read=30s timeout and strict 50MB Content-Length guard."""
@@ -696,30 +771,33 @@ class PaperAggregator:
                 timeout=(30, 90)
             ) as session:
                 resp = await session.get(pdf_url, allow_redirects=True, stream=True)
-                if resp.status_code == 200:
-                    # Check Content-Length header before reading entire payload
-                    content_len_header = resp.headers.get("content-length")
-                    if content_len_header and content_len_header.isdigit():
-                        if int(content_len_header) > max_bytes:
-                            logger.warning(f"Aborting download: Content-Length ({content_len_header}) exceeds 50MB limit.")
-                            return None
+                try:
+                    if resp.status_code == 200:
+                        # Check Content-Length header before reading entire payload
+                        content_len_header = resp.headers.get("content-length")
+                        if content_len_header and content_len_header.isdigit():
+                            if int(content_len_header) > max_bytes:
+                                logger.warning(f"Aborting download: Content-Length ({content_len_header}) exceeds 50MB limit.")
+                                return None
 
-                    chunks = []
-                    downloaded = 0
-                    async for chunk in resp.aiter_content(chunk_size=65536):
-                        downloaded += len(chunk)
-                        if downloaded > max_bytes:
-                            logger.warning("Aborting download: streaming exceeded 50MB limit.")
-                            return None
-                        chunks.append(chunk)
+                        chunks = []
+                        downloaded = 0
+                        async for chunk in resp.aiter_content(chunk_size=65536):
+                            downloaded += len(chunk)
+                            if downloaded > max_bytes:
+                                logger.warning("Aborting download: streaming exceeded 50MB limit.")
+                                return None
+                            chunks.append(chunk)
 
-                    content = b"".join(chunks)
-                    if content.startswith(b"%PDF"):
-                        return content
-                    # Sometimes an initial HTML wrapper redirects, check if %PDF appears in first 1024 bytes
-                    pdf_start = content.find(b"%PDF")
-                    if pdf_start != -1 and pdf_start < 1024:
-                        return content[pdf_start:]
+                        content = b"".join(chunks)
+                        if content.startswith(b"%PDF"):
+                            return content
+                        # Sometimes an initial HTML wrapper redirects, check if %PDF appears in first 1024 bytes
+                        pdf_start = content.find(b"%PDF")
+                        if pdf_start != -1 and pdf_start < 1024:
+                            return content[pdf_start:]
+                finally:
+                    await resp.aclose()
         except Exception as e:
             logger.warning(f"curl_cffi download failed for {pdf_url}: {e}")
 

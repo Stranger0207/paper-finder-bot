@@ -11,6 +11,13 @@ from app.config import settings
 from app.database import db
 from app.bot.handlers import router
 
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -36,7 +43,13 @@ async def start_healthcheck_server() -> web.AppRunner:
 
 
 async def main():
-    settings.validate_credentials()
+    if not settings.is_bot_token_valid:
+        logger.critical(
+            "❌ [FATAL] BOT_TOKEN is invalid or unset! "
+            "Please provide a valid Telegram Bot token in .env or environment variables."
+        )
+        sys.exit(1)
+
     await db.init_db()
     health_runner = await start_healthcheck_server()
 

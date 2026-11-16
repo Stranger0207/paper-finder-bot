@@ -13,3 +13,4 @@ data/*.db-shm
 .DS_Store
 .idea/
 .vscode/
+all_code.txt

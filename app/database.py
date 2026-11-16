@@ -20,6 +20,7 @@ class Database:
     async def init_db(self):
         async with self.lock:
             async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("PRAGMA journal_mode=WAL;")
                 await db.execute("""
                     CREATE TABLE IF NOT EXISTS users (
                         user_id INTEGER PRIMARY KEY,
@@ -69,6 +70,8 @@ class Database:
                     )
                 """)
                 await db.commit()
+
+        await self.cleanup_old_sessions()
 
     async def register_or_update_user(self, user_id: int, username: Optional[str], full_name: str):
         async with self.lock:
@@ -124,6 +127,29 @@ class Database:
                 ))
                 await db.commit()
 
+    async def save_papers_batch(self, papers: list[PaperItem]):
+        """Save a batch of PaperItem records in a single database transaction using executemany."""
+        if not papers:
+            return
+        async with self.lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                params = [
+                    (
+                        p.short_id, p.title, p.authors, p.year,
+                        p.venue, p.abstract, p.doi, p.pdf_url,
+                        p.landing_url, p.source, p.citation_count,
+                        p.arxiv_id
+                    )
+                    for p in papers
+                ]
+                await db.executemany("""
+                    INSERT OR REPLACE INTO papers_cache (
+                        short_id, title, authors, year, venue, abstract,
+                        doi, pdf_url, landing_url, source, citation_count, arxiv_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, params)
+                await db.commit()
+
     async def get_paper(self, short_id: str) -> Optional[PaperItem]:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
@@ -174,12 +200,15 @@ class Database:
                     "last_page": row["last_page"]
                 }
 
-    async def cleanup_old_sessions(self, hours: int = 24):
-        """Cleanup search sessions older than given hours to prevent table bloat."""
+    async def cleanup_old_sessions(self, hours: int = 24, search_log_days: int = 7):
+        """Cleanup search sessions older than given hours and search logs older than given days."""
         async with self.lock:
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute(
                     f"DELETE FROM search_sessions WHERE created_at < datetime('now', '-{hours} hours')"
+                )
+                await db.execute(
+                    f"DELETE FROM search_logs WHERE created_at < datetime('now', '-{search_log_days} days')"
                 )
                 await db.commit()
 
