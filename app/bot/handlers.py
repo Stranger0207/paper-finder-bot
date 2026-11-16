@@ -22,7 +22,8 @@ from app.services.aggregator import (
 from app.services.models import PaperItem
 from app.bot.keyboards import (
     build_paper_keyboard, build_results_list_keyboard,
-    build_cite_keyboard, build_saved_library_keyboard
+    build_cite_keyboard, build_saved_library_keyboard,
+    build_subscription_keyboard, build_admin_receipt_keyboard
 )
 
 logger = logging.getLogger(__name__)
@@ -206,8 +207,12 @@ async def cmd_start(message: Message):
         "• <b>موضوع یا عنوان مقاله</b> را ارسال کنید (مثلاً: <code>Transformer attention mechanism</code>).\n"
         "• یا مستقیماً <b>شناسه DOI</b> را بفرستید (مثلاً: <code>10.1038/nature14539</code>).\n"
         "• یا <b>شناسه arXiv / PMID</b> را ارسال کنید (مثلاً: <code>1706.03762</code>).\n\n"
+        "💎 <b>اشتراک ویژه یک‌ماهه (۵۰,۰۰۰ تومان):</b>\n"
+        "دسترسی به ترجمه نامحدود فارسی چکیده مقالات، اولویت جستجو و دانلود.\n"
+        "برای خرید یا بررسی وضعیت: /subscribe را ارسال کنید.\n\n"
         "📌 دستورات کاربردی:\n"
-        "/stats — مشاهده آمار جستجوهای شما\n"
+        "/subscribe — خرید و مدیریت اشتراک ویژه یک‌ماهه\n"
+        "/stats — مشاهده آمار فعالیت و وضعیت اشتراک شما\n"
         "/saved — مشاهده کتابخانه شخصی و خروجی اکسل/EndNote\n"
         "/help — راهنمای کامل استفاده"
     )
@@ -221,15 +226,17 @@ async def cmd_help(message: Message):
         "1️⃣ <b>جستجوی کلیدواژه:</b> عبارت تخصصی یا عنوان مقاله را ارسال کنید تا لیست مقالات به همراه کیبورد انتخاب برای دریافت چکیده و PDF نمایش داده شود.\n"
         "2️⃣ <b>دانلود مستقیم یا با DOI:</b> برای هر مقاله، روی شماره آن در کیبورد بزنید و سپس دکمه <b>«📥 دریافت PDF»</b> را انتخاب کنید تا فایل مستقیماً در تلگرام ارسال شود.\n"
         "3️⃣ <b>مشاهده چکیده:</b> با زدن دکمه <b>«📖 چکیده»</b>، خلاصه کامل مقاله در پیامی مجزا نمایش داده می‌شود.\n"
-        "4️⃣ <b>ترجمه فارسی:</b> با دکمه <b>«🇮🇷 ترجمه فارسی»</b> چکیده و عنوان مقاله به فارسی ترجمه می‌شود.\n"
+        "4️⃣ <b>ترجمه فارسی:</b> با دکمه <b>«🇮🇷 ترجمه فارسی»</b> چکیده و عنوان مقاله به فارسی ترجمه می‌شود (ویژه کاربران اشتراک ویژه).\n"
         "5️⃣ <b>رفرنس‌دهی:</b> دکمه <b>«📎 رفرنس»</b> سه فرمت APA, IEEE, Vancouver به همراه خروجی BibTeX و RIS ارائه می‌دهد.\n"
         "6️⃣ <b>مقالات مشابه:</b> با دکمه <b>«🕸 مقالات مشابه»</b> مقالات مرتبط پیشنهاد می‌شوند.\n"
-        "7️⃣ <b>کتابخانه شخصی:</b> مقالات مورد علاقه را با <b>«⭐️ ذخیره مقاله»</b> ذخیره و با /saved مشاهده و خروجی بگیرید.\n\n"
+        "7️⃣ <b>کتابخانه شخصی:</b> مقالات مورد علاقه را با <b>«⭐️ ذخیره مقاله»</b> ذخیره و با /saved مشاهده و خروجی بگیرید.\n"
+        "8️⃣ <b>اشتراک ویژه:</b> اشتراک ۳۰ روزه با هزینه ۵۰,۰۰۰ تومان برای ترجمه نامحدود چکیده و امکانات پیشرفته با /subscribe.\n\n"
         "📌 دستورات فعال:\n"
         "/start — شروع به کار و معرفی ربات\n"
-        "/help — راهنمای جامع استفاده\n"
-        "/stats — آمار فعالیت و مقالات کش‌شده\n"
-        "/saved — مشاهده کتابخانه شخصی و خروجی اکسل/EndNote"
+        "/subscribe — خرید و مدیریت اشتراک ویژه یک‌ماهه\n"
+        "/stats — آمار فعالیت و وضعیت اشتراک\n"
+        "/saved — مشاهده کتابخانه شخصی و خروجی اکسل/EndNote\n"
+        "/help — راهنمای جامع استفاده"
     )
     await safe_send_message(message, help_text[:4000])
 
@@ -239,8 +246,11 @@ async def cmd_stats(message: Message):
     if not message.from_user:
         return
     stats = await db.get_user_stats(message.from_user.id)
+    prem_status = "💎 فعال (ویژه)" if stats.get("is_premium") else "عادی (رایگان)"
+    expires_line = f"\n⏳ انقضای اشتراک: <code>{stats.get('premium_expires_at')}</code>" if stats.get("premium_expires_at") else ""
     text = (
         f"📊 <b>آمار فعالیت شما:</b>\n\n"
+        f"👑 وضعیت اشتراک: <b>{prem_status}</b>{expires_line}\n"
         f"🔎 تعداد جستجوهای شما: <b>{stats['user_searches']}</b>\n"
         f"🗂 مقالات کش‌شده در پایگاه: <b>{stats['total_cached_papers']}</b>"
     )
@@ -271,6 +281,213 @@ async def cmd_saved(message: Message):
     text = "\n".join(lines)[:3800]
     kb = build_saved_library_keyboard(papers)
     await safe_send_message(message, text, reply_markup=kb, disable_web_page_preview=True)
+
+
+# ── Subscription & Payment Verification Handlers ──────────────────────
+
+SUBSCRIPTION_TEXT = (
+    "💎 <b>خرید اشتراک ویژه مقاله‌یاب (یک‌ماهه)</b>\n\n"
+    "با خرید اشتراک ویژه، به قابلیت‌های پیشرفته و اختصاصی زیر دسترسی کامل خواهید داشت:\n\n"
+    "✨ <b>آپشن‌های اشتراک ویژه:</b>\n"
+    "• 🇮🇷 <b>ترجمه نامحدود چکیده مقالات</b> به زبان فارسی روان\n"
+    "• 🚀 <b>اولویت بالاتر در پردازش و جستجوی مقالات</b> در پایگاه‌های علمی\n"
+    "• 📥 <b>دسترسی نامحدود به ابزارها و خروجی‌های پیشرفته</b>\n\n"
+    "⏳ <b>مدت اعتبار:</b> ۳۰ روز (یک‌ماهه)\n"
+    "💰 <b>مبلغ سرمایه‌گذاری:</b> ۵۰,۰۰۰ تومان\n"
+    "💳 <b>شماره کارت:</b> <code>6219861843148577</code>\n"
+    "👤 <b>به نام:</b> رضایی (بلوبانک)\n\n"
+    "📌 <b>راهنمای فعال‌سازی:</b>\n"
+    "۱. مبلغ ۵۰,۰۰۰ تومان را به کارت بالا واریز کنید.\n"
+    "۲. روی دکمه <b>«📤 ارسال رسید پرداخت»</b> زیر بزنید.\n"
+    "۳. عکس یا فایل رسید واریزی خود را ارسال کنید تا برای تیم پشتیبانی جهت بررسی ارسال شود."
+)
+
+
+@router.message(Command("subscribe"))
+async def cmd_subscribe(message: Message):
+    """Handle /subscribe command to display subscription details and payment info."""
+    await safe_send_message(
+        message,
+        SUBSCRIPTION_TEXT,
+        reply_markup=build_subscription_keyboard()
+    )
+
+
+@router.callback_query(F.data == "buy_sub")
+async def handle_buy_sub_callback(callback: CallbackQuery):
+    """Handle buy subscription button callback."""
+    await callback.answer()
+    if callback.message:
+        await safe_send_message(
+            callback.message,
+            SUBSCRIPTION_TEXT,
+            reply_markup=build_subscription_keyboard()
+        )
+
+
+@router.callback_query(F.data == "check_sub_status")
+async def handle_check_sub_status(callback: CallbackQuery):
+    """Check and display user subscription status."""
+    await callback.answer()
+    if not callback.from_user or not callback.message:
+        return
+    is_prem, expires_at = await db.get_user_premium_info(callback.from_user.id)
+    if is_prem:
+        exp_text = f"<code>{expires_at}</code>" if expires_at else "نامحدود"
+        status_text = (
+            "💎 <b>وضعیت اشتراک: فعال (ویژه)</b>\n\n"
+            f"⏳ <b>تاریخ انقضا:</b> {exp_text}\n\n"
+            "✨ هم‌اکنون به تمامی قابلیت‌های ویژه از جمله <b>ترجمه نامحدود چکیده مقالات</b> دسترسی کامل دارید!"
+        )
+    else:
+        status_text = (
+            "📊 <b>وضعیت اشتراک: عادی (رایگان)</b>\n\n"
+            "❌ شما در حال حاضر اشتراک ویژه فعال ندارید.\n\n"
+            "برای فعال‌سازی و دسترسی به قابلیت‌های ویژه (ترجمه روان چکیده به فارسی، اولویت در جستجو و دانلود) روی دکمه <b>«💳 خرید اشتراک ویژه»</b> کلیک کنید."
+        )
+    await safe_send_message(callback.message, status_text, reply_markup=build_subscription_keyboard())
+
+
+@router.callback_query(F.data == "send_receipt_guide")
+async def handle_send_receipt_guide(callback: CallbackQuery):
+    """Handle click on send receipt button, adding user to pending receipts."""
+    await callback.answer()
+    if not callback.from_user:
+        return
+    await db.add_pending_receipt(callback.from_user.id)
+    guide_text = "📸 لطفاً تصویر یا اسکرین‌شات رسید پرداخت خود را همین‌جا ارسال کنید تا برای بررسی به تیم پشتیبانی ارسال شود."
+    if callback.message:
+        await safe_send_message(callback.message, guide_text)
+
+
+@router.message(F.photo | F.document)
+async def handle_receipt_upload(message: Message):
+    """Receive receipt photo or document from user and forward to admin group."""
+    if not message.from_user:
+        return
+    if not await db.has_pending_receipt(message.from_user.id):
+        return
+
+    admin_group_id = getattr(settings, "ADMIN_GROUP_ID", -1003989191024)
+    user = message.from_user
+    safe_name = safe_html(user.full_name, 100) or "کاربر"
+    user_id = user.id
+    username_str = f"@{user.username}" if user.username else "ندارد"
+    safe_username = safe_html(username_str, 50)
+
+    caption = (
+        "📩 <b>رسید پرداخت جدید دریافت شد!</b>\n\n"
+        f"👤 <b>کاربر:</b> {safe_name}\n"
+        f"🆔 <b>شناسه عددی:</b> <code>{user_id}</code>\n"
+        f"🔗 <b>نام کاربری:</b> {safe_username}\n"
+        "💰 <b>مبلغ:</b> ۵۰,۰۰۰ تومان (اشتراک ویژه یک‌ماهه)\n\n"
+        "لطفاً پس از بررسی حساب، پرداخت را تایید یا رد کنید:"
+    )
+    admin_kb = build_admin_receipt_keyboard(user_id)
+
+    try:
+        if message.photo:
+            await message.bot.send_photo(
+                chat_id=admin_group_id,
+                photo=message.photo[-1].file_id,
+                caption=caption,
+                reply_markup=admin_kb
+            )
+        elif message.document:
+            await message.bot.send_document(
+                chat_id=admin_group_id,
+                document=message.document.file_id,
+                caption=caption,
+                reply_markup=admin_kb
+            )
+
+        await db.remove_pending_receipt(user_id)
+        await message.answer(
+            "✅ رسید شما با موفقیت برای تیم پشتیبانی ارسال شد. پس از بررسی و تایید، اشتراک ویژه یک‌ماهه شما فعال خواهد شد."
+        )
+    except Exception as e:
+        logger.error(f"Error forwarding receipt to admin group {admin_group_id}: {e}")
+        await message.answer(
+            "⚠️ در ارسال رسید به پشتیبانی خطایی رخ داد. لطفاً چند لحظه بعد مجدداً امتحان کنید یا با پشتیبانی در تماس باشید."
+        )
+
+
+@router.callback_query(F.data.startswith("adm_accept:"))
+async def handle_admin_accept(callback: CallbackQuery):
+    """Handle admin accepting payment receipt in admin group."""
+    parts = callback.data.split(":", 1)
+    if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
+        await callback.answer("خطا در شناسه کاربر.", show_alert=True)
+        return
+
+    user_id = int(parts[1])
+    await db.set_user_premium(user_id, status=1, days=30)
+
+    # Notify the user
+    try:
+        await callback.bot.send_message(
+            chat_id=user_id,
+            text=(
+                "🎉 <b>پرداخت شما تایید شد!</b>\n\n"
+                "اشتراک ویژه یک‌ماهه شما با موفقیت فعال گردید. هم اکنون می‌توانید از قابلیت ترجمه چکیده مقالات استفاده کنید."
+            )
+        )
+    except Exception as e:
+        logger.warning(f"Could not notify user {user_id} of premium approval: {e}")
+
+    # Edit admin message
+    admin_name = safe_html(callback.from_user.full_name if callback.from_user else "ادمین", 60)
+    status_suffix = f"\n\n✅ <b>تایید شده توسط {admin_name}</b>"
+    try:
+        if callback.message:
+            if callback.message.caption:
+                new_caption = (callback.message.caption or "") + status_suffix
+                await callback.message.edit_caption(caption=new_caption[:1024], reply_markup=None)
+            elif callback.message.text:
+                new_text = (callback.message.text or "") + status_suffix
+                await callback.message.edit_text(text=new_text[:4096], reply_markup=None)
+    except Exception as e:
+        logger.warning(f"Failed to edit admin message on accept: {e}")
+
+    await callback.answer("✅ پرداخت تایید و اشتراک کاربر ۳۰ روزه فعال شد.")
+
+
+@router.callback_query(F.data.startswith("adm_reject:"))
+async def handle_admin_reject(callback: CallbackQuery):
+    """Handle admin rejecting payment receipt in admin group."""
+    parts = callback.data.split(":", 1)
+    if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
+        await callback.answer("خطا در شناسه کاربر.", show_alert=True)
+        return
+
+    user_id = int(parts[1])
+
+    # Notify the user
+    try:
+        await callback.bot.send_message(
+            chat_id=user_id,
+            text=(
+                "❌ متأسفانه رسید پرداخت شما توسط پشتیبانی رد شد. در صورت وجود مشکل با پشتیبانی در تماس باشید."
+            )
+        )
+    except Exception as e:
+        logger.warning(f"Could not notify user {user_id} of premium rejection: {e}")
+
+    # Edit admin message
+    admin_name = safe_html(callback.from_user.full_name if callback.from_user else "ادمین", 60)
+    status_suffix = f"\n\n❌ <b>رد شده توسط {admin_name}</b>"
+    try:
+        if callback.message:
+            if callback.message.caption:
+                new_caption = (callback.message.caption or "") + status_suffix
+                await callback.message.edit_caption(caption=new_caption[:1024], reply_markup=None)
+            elif callback.message.text:
+                new_text = (callback.message.text or "") + status_suffix
+                await callback.message.edit_text(text=new_text[:4096], reply_markup=None)
+    except Exception as e:
+        logger.warning(f"Failed to edit admin message on reject: {e}")
+
+    await callback.answer("❌ رسید رد شد.")
 
 
 # ── Search Handler ───────────────────────────────────────────────────
@@ -592,7 +809,27 @@ async def handle_abstract_callback(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("tr:"))
 async def handle_translate_callback(callback: CallbackQuery):
-    """Handle Persian translation of abstract and title."""
+    """Handle Persian translation of abstract and title for premium users."""
+    if not callback.from_user:
+        return
+
+    # Check premium subscription
+    is_prem = await db.is_user_premium(callback.from_user.id)
+    if not is_prem:
+        await callback.answer("❌ این قابلیت مخصوص کاربران دارای اشتراک ویژه است.", show_alert=True)
+        sub_promo = (
+            "🔒 <b>قابلیت ترجمه هوشمند مخصوص کاربران دارای اشتراک ویژه است!</b>\n\n"
+            "با خرید اشتراک ویژه یک‌ماهه (۵۰,۰۰۰ تومان)، به امکانات اختصاصی زیر دسترسی کامل خواهید داشت:\n\n"
+            "✨ <b>آپشن‌های اشتراک ویژه:</b>\n"
+            "• 🇮🇷 <b>ترجمه نامحدود چکیده مقالات</b> به زبان فارسی روان\n"
+            "• 🚀 <b>اولویت بالاتر در پردازش و جستجوی مقالات</b> در پایگاه‌های علمی\n"
+            "• 📥 <b>دسترسی نامحدود به ابزارها و خروجی‌های پیشرفته</b>\n\n"
+            "برای فعال‌سازی و خرید اشتراک، روی دکمه زیر کلیک کنید:"
+        )
+        if callback.message:
+            await safe_send_message(callback.message, sub_promo, reply_markup=build_subscription_keyboard())
+        return
+
     await callback.answer("🇮🇷 در حال ترجمه چکیده به فارسی...")
 
     parts = callback.data.split(":", 1)
@@ -607,27 +844,34 @@ async def handle_translate_callback(callback: CallbackQuery):
             await safe_send_message(callback.message, "⚠️ اطلاعات این مقاله در حافظه منقضی شده است. لطفاً مجدداً جستجو کنید.")
         return
 
-    # Translate title and abstract
-    translated_title = await aggregator.translate_to_persian(paper.title)
-    translated_abstract = None
     empty_abstracts = {
         "چکیده‌ای برای این مقاله ثبت نشده است.",
         "چکیده‌ای برای این مقاله در پایگاه ثبت نشده است.",
         "چکیده‌ای برای این مقاله در دسترس نیست.",
         "بدون چکیده", "چکیده‌ای ثبت نشده است."
     }
-    if paper.abstract and paper.abstract.strip() not in empty_abstracts:
-        translated_abstract = await aggregator.translate_to_persian(paper.abstract[:2500])
+
+    if not paper.abstract or paper.abstract.strip() in empty_abstracts:
+        if callback.message:
+            await safe_send_message(
+                callback.message,
+                f"⚠️ چکیده‌ای برای مقاله <b>{safe_html(paper.title, 200)}</b> در پایگاه ثبت نشده است تا ترجمه شود."
+            )
+        return
+
+    # Translate title and abstract
+    translated_title = await aggregator.translate_to_persian(paper.title)
+    translated_abstract = await aggregator.translate_to_persian(paper.abstract[:2500])
 
     safe_title_en = safe_html(paper.title, 300)
     safe_title_fa = safe_html(translated_title, 300) if translated_title else "ترجمه عنوان ممکن نشد."
-    safe_abstract_fa = safe_html(translated_abstract, 3200) if translated_abstract else "ترجمه چکیده ممکن نشد یا چکیده‌ای موجود نیست."
+    safe_abstract_fa = safe_html(translated_abstract, 3200) if translated_abstract else "ترجمه چکیده ممکن نشد یا در دسترس نیست."
 
     text = (
-        f"🇮🇷 <b>ترجمه فارسی:</b>\n\n"
+        f"🇮🇷 <b>ترجمه فارسی مقاله:</b>\n\n"
         f"📌 <b>عنوان انگلیسی:</b>\n{safe_title_en}\n\n"
         f"📌 <b>عنوان فارسی:</b>\n{safe_title_fa}\n\n"
-        f"📖 <b>ترجمه چکیده:</b>\n{safe_abstract_fa}"
+        f"📖 <b>ترجمه روان چکیده:</b>\n{safe_abstract_fa}"
     )
     if callback.message:
         await safe_send_message(callback.message, text[:4000])

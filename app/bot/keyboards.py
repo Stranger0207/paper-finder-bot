@@ -6,7 +6,7 @@ from app.services.models import PaperItem
 from app.services.aggregator import clean_doi
 
 
-def build_paper_keyboard(paper: PaperItem, is_saved: bool = False) -> InlineKeyboardMarkup:
+def build_paper_keyboard(paper: PaperItem, is_saved: bool = False, is_premium: bool = False) -> InlineKeyboardMarkup:
     buttons = [
         # Row 1: Abstract + Persian Translation
         [
@@ -145,3 +145,28 @@ def build_saved_library_keyboard(papers: list[PaperItem]) -> InlineKeyboardMarku
     ])
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def build_subscription_keyboard() -> InlineKeyboardMarkup:
+    """Build keyboard for premium subscription options."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="💳 خرید اشتراک ویژه (۵۰,۰۰۰ تومان)", callback_data="buy_sub")
+        ],
+        [
+            InlineKeyboardButton(text="📤 ارسال رسید پرداخت", callback_data="send_receipt_guide")
+        ],
+        [
+            InlineKeyboardButton(text="📊 وضعیت اشتراک من", callback_data="check_sub_status")
+        ]
+    ])
+
+
+def build_admin_receipt_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    """Build approval keyboard for admin group with accept and reject buttons."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ تایید پرداخت", callback_data=f"adm_accept:{user_id}"),
+            InlineKeyboardButton(text="❌ رد پرداخت", callback_data=f"adm_reject:{user_id}")
+        ]
+    ])

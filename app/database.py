@@ -27,6 +27,8 @@ class Database:
                         username TEXT,
                         full_name TEXT,
                         searches_count INTEGER DEFAULT 0,
+                        is_premium INTEGER DEFAULT 0,
+                        premium_expires_at TIMESTAMP,
                         joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
@@ -50,6 +52,14 @@ class Database:
                     )
                 """)
                 # Seamless migration for existing databases missing columns
+                try:
+                    await db.execute("ALTER TABLE users ADD COLUMN is_premium INTEGER DEFAULT 0")
+                except Exception:
+                    pass
+                try:
+                    await db.execute("ALTER TABLE users ADD COLUMN premium_expires_at TIMESTAMP")
+                except Exception:
+                    pass
                 try:
                     await db.execute("ALTER TABLE papers_cache ADD COLUMN arxiv_id TEXT")
                 except Exception:
@@ -85,6 +95,12 @@ class Database:
                         short_id TEXT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         PRIMARY KEY (user_id, short_id)
+                    )
+                """)
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS pending_receipts (
+                        user_id INTEGER PRIMARY KEY,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
                 await db.commit()
@@ -232,19 +248,107 @@ class Database:
                 await db.execute(
                     f"DELETE FROM search_logs WHERE created_at < datetime('now', '-{search_log_days} days')"
                 )
+                await db.execute(
+                    "DELETE FROM pending_receipts WHERE created_at < datetime('now', '-2 days')"
+                )
                 await db.commit()
+
+    # ── Premium Subscription & Receipts Methods ──────────────────────
+
+    async def set_user_premium(self, user_id: int, status: int = 1, days: int = 30):
+        """Activate premium subscription for specified days (default 30) or deactivate."""
+        async with self.lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                if status == 1:
+                    await db.execute("""
+                        INSERT INTO users (user_id, is_premium, premium_expires_at)
+                        VALUES (?, 1, datetime('now', ?))
+                        ON CONFLICT(user_id) DO UPDATE SET
+                            is_premium = 1,
+                            premium_expires_at = datetime('now', ?)
+                    """, (user_id, f"+{days} days", f"+{days} days"))
+                else:
+                    await db.execute("""
+                        UPDATE users SET is_premium = 0, premium_expires_at = NULL WHERE user_id = ?
+                    """, (user_id,))
+                await db.commit()
+
+    async def is_user_premium(self, user_id: int) -> bool:
+        """Check if user has an active premium subscription and it hasn't expired."""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("""
+                SELECT 1 FROM users
+                WHERE user_id = ? AND is_premium = 1 AND (premium_expires_at IS NULL OR premium_expires_at > datetime('now'))
+            """, (user_id,)) as cursor:
+                return (await cursor.fetchone()) is not None
+
+    async def get_user_premium_info(self, user_id: int) -> tuple[bool, Optional[str]]:
+        """Return tuple (is_active, premium_expires_at)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("""
+                SELECT is_premium, premium_expires_at FROM users WHERE user_id = ?
+            """, (user_id,)) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    return False, None
+                is_prem, expires_at = row[0], row[1]
+                if not is_prem:
+                    return False, None
+                async with db.execute("""
+                    SELECT 1 FROM users
+                    WHERE user_id = ? AND is_premium = 1 AND (premium_expires_at IS NULL OR premium_expires_at > datetime('now'))
+                """, (user_id,)) as exp_cursor:
+                    is_active = (await exp_cursor.fetchone()) is not None
+                    return is_active, expires_at
+
+    async def add_pending_receipt(self, user_id: int):
+        """Add user to pending receipts table waiting for receipt upload."""
+        async with self.lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("""
+                    INSERT OR REPLACE INTO pending_receipts (user_id, created_at)
+                    VALUES (?, datetime('now'))
+                """, (user_id,))
+                await db.commit()
+
+    async def remove_pending_receipt(self, user_id: int):
+        """Remove user from pending receipts table."""
+        async with self.lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("DELETE FROM pending_receipts WHERE user_id = ?", (user_id,))
+                await db.commit()
+
+    async def has_pending_receipt(self, user_id: int) -> bool:
+        """Check if user is waiting to send payment receipt."""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("SELECT 1 FROM pending_receipts WHERE user_id = ?", (user_id,)) as cursor:
+                return (await cursor.fetchone()) is not None
 
     async def get_user_stats(self, user_id: int) -> dict:
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
-                "SELECT searches_count FROM users WHERE user_id = ?", (user_id,)
+                "SELECT searches_count, is_premium, premium_expires_at FROM users WHERE user_id = ?", (user_id,)
             ) as cursor:
                 user_row = await cursor.fetchone()
             async with db.execute("SELECT COUNT(*) FROM papers_cache") as cursor:
                 cache_row = await cursor.fetchone()
+
+            is_premium = False
+            premium_expires = None
+            if user_row and user_row[1]:
+                async with db.execute(
+                    "SELECT 1 FROM users WHERE user_id = ? AND is_premium = 1 AND (premium_expires_at IS NULL OR premium_expires_at > datetime('now'))",
+                    (user_id,)
+                ) as exp_cursor:
+                    if await exp_cursor.fetchone():
+                        is_premium = True
+                        premium_expires = user_row[2]
+
             return {
                 "user_searches": user_row[0] if user_row else 0,
-                "total_cached_papers": cache_row[0] if cache_row else 0
+                "total_cached_papers": cache_row[0] if cache_row else 0,
+                "is_premium": is_premium,
+                "premium_expires_at": premium_expires
             }
 
     # ── Bookmark / Personal Library Methods ──────────────────────────
