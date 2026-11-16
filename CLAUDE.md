@@ -48,18 +48,23 @@ When generating, refactoring, or updating code for this repository, you MUST obe
   git push origin main
   ```
 
-## 5. Linux VPS Deployment & Hot Reload
-- Production deployment uses Docker Compose:
+## 5. Linux VPS Deployment (Systemd Service - Lightweight & Recommended)
+- Setup 24/7 background service with auto-restart on git pull:
   ```bash
-  # First time:
-  git clone <REPO_URL> paper-finder-bot
   cd paper-finder-bot
-  cp .env.example .env
-  nano .env  # set BOT_TOKEN, CONTACT_EMAIL
-  docker compose up -d --build
-
-  # On every update from GitHub:
-  git pull origin main
-  docker compose up -d --build
+  chmod +x setup_service.sh update.sh
+  ./setup_service.sh
+  ```
+- Any future update:
+  ```bash
+  git pull  # automatically restarts paper-bot service via post-merge hook!
+  # or run:
+  ./update.sh
+  ```
+- Service commands:
+  ```bash
+  sudo systemctl status paper-bot
+  sudo systemctl restart paper-bot
+  sudo journalctl -u paper-bot -f -n 50
   ```
 
