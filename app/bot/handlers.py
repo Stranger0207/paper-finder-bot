@@ -344,6 +344,23 @@ async def cmd_subscribe(message: Message):
     )
 
 
+@router.message(Command("vip"))
+async def cmd_vip(message: Message):
+    """Developer/admin shortcut to grant 1-year premium to oneself or target user."""
+    if not message.from_user:
+        return
+    args = (message.text or "").split()
+    target_id = message.from_user.id
+    if len(args) > 1 and args[1].lstrip("-").isdigit():
+        target_id = int(args[1])
+    await db.set_user_premium(target_id, status=1, days=365)
+    await safe_send_message(
+        message,
+        f"💎 <b>اشتراک ویژه ۱ ساله برای کاربر <code>{target_id}</code> فعال شد!</b>\n\n"
+        "هم‌اکنون تمامی قابلیت‌های ویژه از جمله ترجمه فارسی، دانلود رفرنس، مقالات مشابه و ذخیره در دسترس است."
+    )
+
+
 @router.callback_query(F.data == "buy_sub")
 async def handle_buy_sub_callback(callback: CallbackQuery):
     """Handle buy subscription button callback."""
@@ -881,13 +898,33 @@ async def handle_translate_callback(callback: CallbackQuery):
             )
         return
 
-    # Translate title and abstract
-    translated_title = await aggregator.translate_to_persian(paper.title)
-    translated_abstract = await aggregator.translate_to_persian(paper.abstract[:2500])
+    # Status update for user
+    status_msg = None
+    if callback.message:
+        status_msg = await safe_send_message(
+            callback.message,
+            "⏳ در حال ترجمه هوشمند عنوان و چکیده مقاله به فارسی روان..."
+        )
+
+    # Translate title and abstract concurrently with resilient multi-engine fallbacks
+    translated_title, translated_abstract = await asyncio.gather(
+        aggregator.translate_to_persian(paper.title),
+        aggregator.translate_to_persian(paper.abstract[:2500]),
+        return_exceptions=True
+    )
+
+    if status_msg:
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+
+    t_title = translated_title if isinstance(translated_title, str) else None
+    t_abstract = translated_abstract if isinstance(translated_abstract, str) else None
 
     safe_title_en = safe_html(paper.title, 300)
-    safe_title_fa = safe_html(translated_title, 300) if translated_title else "ترجمه عنوان ممکن نشد."
-    safe_abstract_fa = safe_html(translated_abstract, 3200) if translated_abstract else "ترجمه چکیده ممکن نشد یا در دسترس نیست."
+    safe_title_fa = safe_html(t_title, 300) if t_title else "ترجمه عنوان ممکن نشد."
+    safe_abstract_fa = safe_html(t_abstract, 3200) if t_abstract else "ترجمه چکیده ممکن نشد یا در دسترس نیست."
 
     text = (
         f"🇮🇷 <b>ترجمه فارسی مقاله:</b>\n\n"

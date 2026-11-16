@@ -1078,31 +1078,74 @@ class PaperAggregator:
         return None
 
     async def translate_to_persian(self, text: str) -> Optional[str]:
-        """Translate text to Persian using reliable public translation API."""
+        """Translate text to Persian with resilient multi-provider fallback (Google Chrome Ex, GTX API, curl_cffi, MyMemory)."""
         if not text or not text.strip():
             return None
-        url = "https://translate.googleapis.com/translate_a/single"
-        params = {
-            "client": "gtx",
-            "sl": "auto",
-            "tl": "fa",
-            "dt": "t",
-            "q": text[:2000]
-        }
+
+        cleaned_text = text.strip()[:2500]
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
+
+        # 1. Primary: Google Chrome Extension endpoint (clients5.google.com) - virtually unblocked and fast
         try:
-            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, proxy=settings.clean_proxy) as client:
-                resp = await client.get(url, params=params, headers=headers)
+            url_c5 = "https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=auto&tl=fa"
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, proxy=settings.clean_proxy) as client:
+                resp = await client.post(url_c5, data={"q": cleaned_text}, headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if isinstance(data, list) and len(data) > 0:
+                        if isinstance(data[0], list) and len(data[0]) > 0 and data[0][0]:
+                            return str(data[0][0]).strip()
+                        elif isinstance(data[0], str) and data[0].strip():
+                            return data[0].strip()
+        except Exception as e:
+            logger.debug(f"Translation clients5 fallback trigger: {e}")
+
+        # 2. Secondary: Google Translate GTX endpoint via POST
+        try:
+            url_gtx = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=fa&dt=t"
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, proxy=settings.clean_proxy) as client:
+                resp = await client.post(url_gtx, data={"q": cleaned_text}, headers=headers)
                 if resp.status_code == 200:
                     data = resp.json()
                     if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
                         parts = [item[0] for item in data[0] if isinstance(item, list) and len(item) > 0 and item[0]]
                         translated = "".join(parts).strip()
-                        return translated if translated else None
+                        if translated:
+                            return translated
         except Exception as e:
-            logger.warning(f"Translation error: {e}")
+            logger.debug(f"Translation gtx post fallback trigger: {e}")
+
+        # 3. Tertiary: Google Translate via curl_cffi (Chrome TLS fingerprint bypass)
+        try:
+            url_gtx = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=fa&dt=t"
+            async with AsyncSession(impersonate="chrome120", proxy=settings.clean_proxy) as session:
+                resp = await session.post(url_gtx, data={"q": cleaned_text}, timeout=10)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
+                        parts = [item[0] for item in data[0] if isinstance(item, list) and len(item) > 0 and item[0]]
+                        translated = "".join(parts).strip()
+                        if translated:
+                            return translated
+        except Exception as e:
+            logger.debug(f"Translation curl_cffi fallback trigger: {e}")
+
+        # 4. Quaternary: MyMemory Translation API fallback
+        try:
+            url_mymemory = "https://api.mymemory.translated.net/get"
+            params = {"q": cleaned_text[:500], "langpair": "en|fa"}
+            async with httpx.AsyncClient(timeout=10.0, proxy=settings.clean_proxy) as client:
+                resp = await client.get(url_mymemory, params=params)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    res = (data.get("responseData") or {}).get("translatedText")
+                    if res and "MYMEMORY WARNING" not in res:
+                        return res.strip()
+        except Exception as e:
+            logger.warning(f"All translation engines failed, last error: {e}")
+
         return None
 
     async def get_related_papers(self, paper: PaperItem, limit: int = 10) -> list[PaperItem]:
