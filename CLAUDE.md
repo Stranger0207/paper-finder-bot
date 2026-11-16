@@ -37,3 +37,29 @@ When generating, refactoring, or updating code for this repository, you MUST obe
 ## 3. How to Add New Features
 - **Adding a new academic source:** Create an async method `search_<source>(query: str)` in `app/services/aggregator.py` returning `list[PaperItem]`, then include it inside `asyncio.gather()` in `search_papers()`.
 - **Adding new bot commands:** Register handlers in `app/bot/handlers.py` and keep business/network logic inside `app/services/`.
+
+## 4. Git & GitHub Workflow for Continuous Updates
+- Branch: `main`
+- Standard commit messages: `feat: ...`, `fix: ...`, `refactor: ...`, `docs: ...`
+- Push workflow:
+  ```bash
+  git add .
+  git commit -m "feat: description of changes"
+  git push origin main
+  ```
+
+## 5. Linux VPS Deployment & Hot Reload
+- Production deployment uses Docker Compose:
+  ```bash
+  # First time:
+  git clone <REPO_URL> paper-finder-bot
+  cd paper-finder-bot
+  cp .env.example .env
+  nano .env  # set BOT_TOKEN, CONTACT_EMAIL
+  docker compose up -d --build
+
+  # On every update from GitHub:
+  git pull origin main
+  docker compose up -d --build
+  ```
+
