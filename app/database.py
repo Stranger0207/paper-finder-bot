@@ -44,12 +44,22 @@ class Database:
                         source TEXT,
                         citation_count INTEGER DEFAULT 0,
                         arxiv_id TEXT,
+                        tldr TEXT,
+                        publisher TEXT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
-                # Seamless migration for existing databases missing arxiv_id column
+                # Seamless migration for existing databases missing columns
                 try:
                     await db.execute("ALTER TABLE papers_cache ADD COLUMN arxiv_id TEXT")
+                except Exception:
+                    pass
+                try:
+                    await db.execute("ALTER TABLE papers_cache ADD COLUMN tldr TEXT")
+                except Exception:
+                    pass
+                try:
+                    await db.execute("ALTER TABLE papers_cache ADD COLUMN publisher TEXT")
                 except Exception:
                     pass
 
@@ -67,6 +77,14 @@ class Database:
                         query TEXT,
                         last_page INTEGER DEFAULT 1,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS bookmarks (
+                        user_id INTEGER,
+                        short_id TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY (user_id, short_id)
                     )
                 """)
                 await db.commit()
@@ -117,13 +135,14 @@ class Database:
                 await db.execute("""
                     INSERT OR REPLACE INTO papers_cache (
                         short_id, title, authors, year, venue, abstract,
-                        doi, pdf_url, landing_url, source, citation_count, arxiv_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        doi, pdf_url, landing_url, source, citation_count, arxiv_id,
+                        tldr, publisher
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     paper.short_id, paper.title, paper.authors, paper.year,
                     paper.venue, paper.abstract, paper.doi, paper.pdf_url,
                     paper.landing_url, paper.source, paper.citation_count,
-                    paper.arxiv_id
+                    paper.arxiv_id, paper.tldr, paper.publisher
                 ))
                 await db.commit()
 
@@ -138,15 +157,16 @@ class Database:
                         p.short_id, p.title, p.authors, p.year,
                         p.venue, p.abstract, p.doi, p.pdf_url,
                         p.landing_url, p.source, p.citation_count,
-                        p.arxiv_id
+                        p.arxiv_id, p.tldr, p.publisher
                     )
                     for p in papers
                 ]
                 await db.executemany("""
                     INSERT OR REPLACE INTO papers_cache (
                         short_id, title, authors, year, venue, abstract,
-                        doi, pdf_url, landing_url, source, citation_count, arxiv_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        doi, pdf_url, landing_url, source, citation_count, arxiv_id,
+                        tldr, publisher
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, params)
                 await db.commit()
 
@@ -171,7 +191,9 @@ class Database:
                     landing_url=row["landing_url"],
                     source=row["source"],
                     citation_count=row["citation_count"],
-                    arxiv_id=row["arxiv_id"] if "arxiv_id" in keys else None
+                    arxiv_id=row["arxiv_id"] if "arxiv_id" in keys else None,
+                    tldr=row["tldr"] if "tldr" in keys else None,
+                    publisher=row["publisher"] if "publisher" in keys else None
                 )
                 paper.short_id = row["short_id"]
                 return paper
@@ -224,6 +246,83 @@ class Database:
                 "user_searches": user_row[0] if user_row else 0,
                 "total_cached_papers": cache_row[0] if cache_row else 0
             }
+
+    # ── Bookmark / Personal Library Methods ──────────────────────────
+
+    async def toggle_bookmark(self, user_id: int, short_id: str) -> bool:
+        """Toggle bookmark for a paper. Returns True if bookmarked, False if removed."""
+        async with self.lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute(
+                    "SELECT 1 FROM bookmarks WHERE user_id = ? AND short_id = ?",
+                    (user_id, short_id)
+                ) as cursor:
+                    exists = await cursor.fetchone()
+                if exists:
+                    await db.execute(
+                        "DELETE FROM bookmarks WHERE user_id = ? AND short_id = ?",
+                        (user_id, short_id)
+                    )
+                    await db.commit()
+                    return False
+                else:
+                    await db.execute(
+                        "INSERT INTO bookmarks (user_id, short_id) VALUES (?, ?)",
+                        (user_id, short_id)
+                    )
+                    await db.commit()
+                    return True
+
+    async def is_bookmarked(self, user_id: int, short_id: str) -> bool:
+        """Check if a paper is bookmarked by the user."""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT 1 FROM bookmarks WHERE user_id = ? AND short_id = ?",
+                (user_id, short_id)
+            ) as cursor:
+                return (await cursor.fetchone()) is not None
+
+    async def get_user_bookmarks(self, user_id: int) -> list[PaperItem]:
+        """Get all bookmarked papers for a user, ordered by most recent first."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("""
+                SELECT p.* FROM papers_cache p
+                INNER JOIN bookmarks b ON p.short_id = b.short_id
+                WHERE b.user_id = ?
+                ORDER BY b.created_at DESC
+            """, (user_id,)) as cursor:
+                rows = await cursor.fetchall()
+                papers = []
+                for row in rows:
+                    keys = row.keys()
+                    paper = PaperItem(
+                        title=row["title"],
+                        authors=row["authors"],
+                        year=row["year"],
+                        venue=row["venue"],
+                        abstract=row["abstract"],
+                        doi=row["doi"],
+                        pdf_url=row["pdf_url"],
+                        landing_url=row["landing_url"],
+                        source=row["source"],
+                        citation_count=row["citation_count"],
+                        arxiv_id=row["arxiv_id"] if "arxiv_id" in keys else None,
+                        tldr=row["tldr"] if "tldr" in keys else None,
+                        publisher=row["publisher"] if "publisher" in keys else None
+                    )
+                    paper.short_id = row["short_id"]
+                    papers.append(paper)
+                return papers
+
+    async def clear_user_bookmarks(self, user_id: int) -> None:
+        """Remove all bookmarks for a user."""
+        async with self.lock:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    "DELETE FROM bookmarks WHERE user_id = ?", (user_id,)
+                )
+                await db.commit()
 
 
 db = Database()

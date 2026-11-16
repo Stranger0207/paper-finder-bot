@@ -16,6 +16,8 @@ class PaperItem:
     source: str = "OpenAlex"
     citation_count: int = 0
     arxiv_id: Optional[str] = None
+    tldr: Optional[str] = None
+    publisher: Optional[str] = None
     short_id: str = field(init=False)
 
     def __post_init__(self):

@@ -14,9 +14,16 @@ from aiogram.types import Message, CallbackQuery, BufferedInputFile
 
 from app.config import settings
 from app.database import db
-from app.services.aggregator import aggregator, clean_doi
+from app.services.aggregator import (
+    aggregator, clean_doi, extract_multiple_dois,
+    filter_and_sort_papers, generate_citations, generate_bibtex,
+    generate_ris, generate_csv_bytes
+)
 from app.services.models import PaperItem
-from app.bot.keyboards import build_paper_keyboard, build_results_list_keyboard
+from app.bot.keyboards import (
+    build_paper_keyboard, build_results_list_keyboard,
+    build_cite_keyboard, build_saved_library_keyboard
+)
 
 logger = logging.getLogger(__name__)
 
@@ -128,13 +135,26 @@ def format_paper_card(paper: PaperItem, index: int) -> str:
     doi_text = safe_html(clean_d, 80) if clean_d else "ندارد"
     oa_badge = "🟢 دسترسی باز (Open Access)" if paper.pdf_url else "🟡 نیازمند استعلام / DOI"
 
+    # Publisher info
+    publisher_line = ""
+    if paper.publisher:
+        safe_publisher = safe_html(paper.publisher, 100)
+        publisher_line = f"\n🏢 <b>ناشر:</b> {safe_publisher}"
+
+    # TL;DR line
+    tldr_line = ""
+    if paper.tldr:
+        safe_tldr = safe_html(paper.tldr, 250)
+        tldr_line = f"\n\n💡 <b>خلاصه یک‌خطی (TL;DR):</b> <i>{safe_tldr}</i>"
+
     card = (
         f"📄 <b>{index}. {safe_title}</b>\n\n"
         f"✍️ <b>نویسندگان:</b> {safe_authors}\n"
-        f"🏛 <b>انتشارات:</b> {safe_venue} ({safe_year})\n"
+        f"🏛 <b>انتشارات:</b> {safe_venue} ({safe_year}){publisher_line}\n"
         f"📊 <b>تعداد ارجاعات:</b> {paper.citation_count} | <b>منبع:</b> {safe_source}\n"
         f"🆔 <b>DOI:</b> <code>{doi_text}</code>\n"
         f"📌 <b>وضعیت فایل:</b> {oa_badge}"
+        f"{tldr_line}"
     )
     return card[:4000]
 
@@ -143,13 +163,15 @@ def format_papers_list_message(
     papers: list[PaperItem],
     query: str,
     page: int = 1,
-    start_idx: int = 1
+    start_idx: int = 1,
+    sort_label: str = ""
 ) -> str:
     """Format multiple paper search results into a single clean text message under 3800 characters."""
     safe_q = safe_html(query, 50)
+    header_extra = f"\n{sort_label}" if sort_label else ""
     lines = [
         f"🔍 <b>نتایج جستجو برای:</b> «<code>{safe_q}</code>» (صفحه {page})\n"
-        f"<i>💡 برای مشاهده مشخصات کامل، چکیده و دریافت PDF، روی شماره مقاله در کیبورد زیر بزنید:</i>\n"
+        f"<i>💡 برای مشاهده مشخصات کامل، چکیده و دریافت PDF، روی شماره مقاله در کیبورد زیر بزنید:</i>{header_extra}\n"
     ]
     for offset, paper in enumerate(papers):
         idx = start_idx + offset
@@ -165,6 +187,8 @@ def format_papers_list_message(
     full_text = "\n".join(lines)
     return full_text[:3800]
 
+
+# ── Command Handlers ─────────────────────────────────────────────────
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
@@ -184,6 +208,7 @@ async def cmd_start(message: Message):
         "• یا <b>شناسه arXiv / PMID</b> را ارسال کنید (مثلاً: <code>1706.03762</code>).\n\n"
         "📌 دستورات کاربردی:\n"
         "/stats — مشاهده آمار جستجوهای شما\n"
+        "/saved — مشاهده کتابخانه شخصی و خروجی اکسل/EndNote\n"
         "/help — راهنمای کامل استفاده"
     )
     await safe_send_message(message, welcome_text[:4000])
@@ -194,8 +219,17 @@ async def cmd_help(message: Message):
     help_text = (
         "📚 <b>راهنمای استفاده از ربات مقاله‌یاب:</b>\n\n"
         "1️⃣ <b>جستجوی کلیدواژه:</b> عبارت تخصصی یا عنوان مقاله را ارسال کنید تا لیست مقالات به همراه کیبورد انتخاب برای دریافت چکیده و PDF نمایش داده شود.\n"
-        "2️⃣ <b>دانلود مستقیم یا با DOI:</b> برای هر مقاله، روی شماره آن در کیبورد بزنید و سپس دکمه <b>«📥 دریافت فایل PDF»</b> را انتخاب کنید تا فایل مستقیماً در تلگرام ارسال شود.\n"
-        "3️⃣ <b>مشاهده چکیده:</b> با زدن دکمه <b>«📖 نمایش چکیده»</b>، خلاصه کامل مقاله در پیامی مجزا نمایش داده می‌شود."
+        "2️⃣ <b>دانلود مستقیم یا با DOI:</b> برای هر مقاله، روی شماره آن در کیبورد بزنید و سپس دکمه <b>«📥 دریافت PDF»</b> را انتخاب کنید تا فایل مستقیماً در تلگرام ارسال شود.\n"
+        "3️⃣ <b>مشاهده چکیده:</b> با زدن دکمه <b>«📖 چکیده»</b>، خلاصه کامل مقاله در پیامی مجزا نمایش داده می‌شود.\n"
+        "4️⃣ <b>ترجمه فارسی:</b> با دکمه <b>«🇮🇷 ترجمه فارسی»</b> چکیده و عنوان مقاله به فارسی ترجمه می‌شود.\n"
+        "5️⃣ <b>رفرنس‌دهی:</b> دکمه <b>«📎 رفرنس»</b> سه فرمت APA, IEEE, Vancouver به همراه خروجی BibTeX و RIS ارائه می‌دهد.\n"
+        "6️⃣ <b>مقالات مشابه:</b> با دکمه <b>«🕸 مقالات مشابه»</b> مقالات مرتبط پیشنهاد می‌شوند.\n"
+        "7️⃣ <b>کتابخانه شخصی:</b> مقالات مورد علاقه را با <b>«⭐️ ذخیره مقاله»</b> ذخیره و با /saved مشاهده و خروجی بگیرید.\n\n"
+        "📌 دستورات فعال:\n"
+        "/start — شروع به کار و معرفی ربات\n"
+        "/help — راهنمای جامع استفاده\n"
+        "/stats — آمار فعالیت و مقالات کش‌شده\n"
+        "/saved — مشاهده کتابخانه شخصی و خروجی اکسل/EndNote"
     )
     await safe_send_message(message, help_text[:4000])
 
@@ -213,6 +247,34 @@ async def cmd_stats(message: Message):
     await safe_send_message(message, text[:4000])
 
 
+@router.message(Command("saved"))
+async def cmd_saved(message: Message):
+    if not message.from_user:
+        return
+    papers = await db.get_user_bookmarks(message.from_user.id)
+    if not papers:
+        await safe_send_message(
+            message,
+            "📚 <b>کتابخانه شخصی شما خالی است.</b>\n\n"
+            "💡 برای ذخیره مقاله، پس از جستجو و مشاهده کارت مقاله، دکمه <b>«⭐️ ذخیره مقاله»</b> را بزنید.\n"
+            "مقالات ذخیره‌شده اینجا نمایش داده می‌شوند و می‌توانید خروجی CSV، BibTeX و RIS بگیرید."
+        )
+        return
+
+    lines = [f"📚 <b>کتابخانه شخصی شما ({len(papers)} مقاله):</b>\n"]
+    for idx, p in enumerate(papers, 1):
+        icon = "🟢" if p.pdf_url else "🟡"
+        safe_title = safe_html(p.title, 85)
+        safe_year = safe_html(p.year, 10) or "نامشخص"
+        lines.append(f"<b>{idx}.</b> {icon} <b>{safe_title}</b> ({safe_year})")
+
+    text = "\n".join(lines)[:3800]
+    kb = build_saved_library_keyboard(papers)
+    await safe_send_message(message, text, reply_markup=kb, disable_web_page_preview=True)
+
+
+# ── Search Handler ───────────────────────────────────────────────────
+
 @router.message(F.text & ~F.text.startswith("/"))
 async def handle_search_query(message: Message):
     query = (message.text or "").strip()
@@ -229,6 +291,36 @@ async def handle_search_query(message: Message):
             )
             return
         await db.log_search(message.from_user.id, query)
+
+    # Batch DOI detection: if message contains 2+ DOIs, handle them together
+    dois = extract_multiple_dois(query)
+    if len(dois) >= 2:
+        status_msg = await safe_send_message(
+            message,
+            f"🔍 تعداد {len(dois[:10])} شناسه DOI شناسایی شد. در حال استعلام همزمان مقالات..."
+        )
+        papers = await aggregator.lookup_multiple_dois(dois[:10])
+
+        if not papers:
+            not_found_msg = "❌ هیچ‌یک از شناسه‌های DOI ارسال‌شده یافت نشد.\n💡 لطفاً شناسه‌ها را بررسی و مجدداً ارسال کنید."
+            if status_msg:
+                await safe_edit_text(status_msg, not_found_msg)
+            else:
+                await safe_send_message(message, not_found_msg)
+            return
+
+        if status_msg:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+
+        await db.save_papers_batch(papers)
+
+        list_text = format_papers_list_message(papers, f"Batch DOI ({len(papers)} مقاله)", page=1, start_idx=1)
+        list_kb = build_results_list_keyboard(papers, start_idx=1)
+        await safe_send_message(message, list_text, reply_markup=list_kb, disable_web_page_preview=True)
+        return
 
     status_msg = await safe_send_message(
         message,
@@ -257,8 +349,11 @@ async def handle_search_query(message: Message):
     if len(papers) == 1:
         single_paper = papers[0]
         await db.save_paper(single_paper)
+        is_saved = False
+        if message.from_user:
+            is_saved = await db.is_bookmarked(message.from_user.id, single_paper.short_id)
         card_html = format_paper_card(single_paper, 1)
-        kb = build_paper_keyboard(single_paper)
+        kb = build_paper_keyboard(single_paper, is_saved=is_saved)
         await safe_send_message(message, card_html, reply_markup=kb, disable_web_page_preview=True)
         return
 
@@ -269,7 +364,7 @@ async def handle_search_query(message: Message):
     next_page = None
     if len(papers) >= settings.MAX_RESULTS:
         session_id = hashlib.sha256(query.strip().lower().encode("utf-8")).hexdigest()[:10]
-        session_cache.set(session_id, {"query": query, "page": 1})
+        session_cache.set(session_id, {"query": query, "page": 1, "papers": papers})
         await db.save_search_session(session_id, query, page=1)
         next_page = 2
 
@@ -290,11 +385,14 @@ async def handle_unknown_command(message: Message):
         "📌 دستورات فعال ربات:\n"
         "/start — شروع به کار و معرفی ربات\n"
         "/help — راهنمای جامع استفاده\n"
-        "/stats — آمار فعالیت و مقالات کش‌شده\n\n"
+        "/stats — آمار فعالیت و مقالات کش‌شده\n"
+        "/saved — مشاهده کتابخانه شخصی و خروجی اکسل/EndNote\n\n"
         "💡 برای جستجوی مقاله، کافیست <b>عنوان، کلیدواژه، شناسه DOI یا arXiv ID</b> را بدون اسلش (/) ارسال کنید."
     )
     await safe_send_message(message, unknown_text[:4000])
 
+
+# ── Callback Handlers ────────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("more:"))
 async def handle_more_results_callback(callback: CallbackQuery):
@@ -355,7 +453,7 @@ async def handle_more_results_callback(callback: CallbackQuery):
     start_idx = (target_page - 1) * settings.MAX_RESULTS + 1
     next_page = None
     if len(papers) >= settings.MAX_RESULTS:
-        session_cache.set(session_id, {"query": query, "page": target_page})
+        session_cache.set(session_id, {"query": query, "page": target_page, "papers": papers})
         await db.save_search_session(session_id, query, page=target_page)
         next_page = target_page + 1
 
@@ -368,6 +466,62 @@ async def handle_more_results_callback(callback: CallbackQuery):
     )
     if callback.message:
         await safe_send_message(callback.message, list_text, reply_markup=list_kb, disable_web_page_preview=True)
+
+
+@router.callback_query(F.data.startswith("flt:"))
+async def handle_filter_callback(callback: CallbackQuery):
+    """Handle filter/sort buttons: flt:{session_id}:{mode}"""
+    await callback.answer()
+
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        return
+
+    session_id = parts[1]
+    mode = parts[2]
+
+    # Retrieve papers from session cache or re-search
+    session_data = session_cache.get(session_id)
+    papers = None
+    query = ""
+
+    if session_data:
+        papers = session_data.get("papers")
+        query = session_data.get("query", "")
+
+    if not papers:
+        # Fallback: re-search from db session
+        db_session = await db.get_search_session(session_id)
+        if db_session:
+            query = db_session["query"]
+            papers = await aggregator.search_papers(query, page=1, page_size=settings.MAX_RESULTS)
+            if papers:
+                await db.save_papers_batch(papers)
+
+    if not papers:
+        if callback.message:
+            await safe_send_message(callback.message, "⚠️ مهلت این جستجو منقضی شده. لطفاً مجدداً جستجو کنید.")
+        return
+
+    sorted_papers = filter_and_sort_papers(papers, mode)
+
+    sort_labels = {
+        "cit": "🔥 مرتب‌شده بر اساس بیشترین ارجاع",
+        "new": "🆕 مرتب‌شده بر اساس جدیدترین",
+        "oa": "🟢 اولویت مقالات دارای PDF رایگان",
+    }
+    sort_label = sort_labels.get(mode, "")
+
+    list_text = format_papers_list_message(sorted_papers, query, page=1, start_idx=1, sort_label=sort_label)
+    list_kb = build_results_list_keyboard(sorted_papers, start_idx=1, session_id=session_id)
+
+    if callback.message:
+        await safe_edit_text(
+            callback.message,
+            list_text,
+            reply_markup=list_kb,
+            disable_web_page_preview=True
+        )
 
 
 @router.callback_query(F.data.startswith("sel:"))
@@ -393,8 +547,12 @@ async def handle_select_paper_callback(callback: CallbackQuery):
             )
         return
 
+    is_saved = False
+    if callback.from_user:
+        is_saved = await db.is_bookmarked(callback.from_user.id, short_id)
+
     card_html = format_paper_card(paper, idx)
-    kb = build_paper_keyboard(paper)
+    kb = build_paper_keyboard(paper, is_saved=is_saved)
     if callback.message:
         await safe_send_message(
             callback.message,
@@ -430,6 +588,274 @@ async def handle_abstract_callback(callback: CallbackQuery):
     )
     if callback.message:
         await safe_send_message(callback.message, text[:4000])
+
+
+@router.callback_query(F.data.startswith("tr:"))
+async def handle_translate_callback(callback: CallbackQuery):
+    """Handle Persian translation of abstract and title."""
+    await callback.answer("🇮🇷 در حال ترجمه چکیده به فارسی...")
+
+    parts = callback.data.split(":", 1)
+    if len(parts) < 2:
+        return
+
+    short_id = parts[1]
+    paper = await db.get_paper(short_id)
+
+    if not paper:
+        if callback.message:
+            await safe_send_message(callback.message, "⚠️ اطلاعات این مقاله در حافظه منقضی شده است. لطفاً مجدداً جستجو کنید.")
+        return
+
+    # Translate title and abstract
+    translated_title = await aggregator.translate_to_persian(paper.title)
+    translated_abstract = None
+    empty_abstracts = {
+        "چکیده‌ای برای این مقاله ثبت نشده است.",
+        "چکیده‌ای برای این مقاله در پایگاه ثبت نشده است.",
+        "چکیده‌ای برای این مقاله در دسترس نیست.",
+        "بدون چکیده", "چکیده‌ای ثبت نشده است."
+    }
+    if paper.abstract and paper.abstract.strip() not in empty_abstracts:
+        translated_abstract = await aggregator.translate_to_persian(paper.abstract[:2500])
+
+    safe_title_en = safe_html(paper.title, 300)
+    safe_title_fa = safe_html(translated_title, 300) if translated_title else "ترجمه عنوان ممکن نشد."
+    safe_abstract_fa = safe_html(translated_abstract, 3200) if translated_abstract else "ترجمه چکیده ممکن نشد یا چکیده‌ای موجود نیست."
+
+    text = (
+        f"🇮🇷 <b>ترجمه فارسی:</b>\n\n"
+        f"📌 <b>عنوان انگلیسی:</b>\n{safe_title_en}\n\n"
+        f"📌 <b>عنوان فارسی:</b>\n{safe_title_fa}\n\n"
+        f"📖 <b>ترجمه چکیده:</b>\n{safe_abstract_fa}"
+    )
+    if callback.message:
+        await safe_send_message(callback.message, text[:4000])
+
+
+@router.callback_query(F.data.startswith("cite:"))
+async def handle_cite_callback(callback: CallbackQuery):
+    """Handle citation/reference generation."""
+    await callback.answer()
+
+    parts = callback.data.split(":", 1)
+    if len(parts) < 2:
+        return
+
+    short_id = parts[1]
+    paper = await db.get_paper(short_id)
+
+    if not paper:
+        if callback.message:
+            await safe_send_message(callback.message, "⚠️ اطلاعات این مقاله در حافظه منقضی شده است.")
+        return
+
+    citations = generate_citations(paper)
+    safe_apa = safe_html(citations["apa"], 600)
+    safe_ieee = safe_html(citations["ieee"], 600)
+    safe_vancouver = safe_html(citations["vancouver"], 600)
+
+    text = (
+        f"📎 <b>رفرنس‌های مقاله:</b>\n\n"
+        f"🔹 <b>APA:</b>\n<code>{safe_apa}</code>\n\n"
+        f"🔹 <b>IEEE:</b>\n<code>{safe_ieee}</code>\n\n"
+        f"🔹 <b>Vancouver:</b>\n<code>{safe_vancouver}</code>"
+    )
+    kb = build_cite_keyboard(short_id)
+    if callback.message:
+        await safe_send_message(callback.message, text[:4000], reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("dlbib:"))
+async def handle_download_bibtex_callback(callback: CallbackQuery):
+    """Handle BibTeX file download."""
+    await callback.answer("📥 در حال ساخت فایل BibTeX...")
+
+    parts = callback.data.split(":", 1)
+    if len(parts) < 2:
+        return
+
+    short_id = parts[1]
+    paper = await db.get_paper(short_id)
+
+    if not paper:
+        if callback.message:
+            await safe_send_message(callback.message, "⚠️ اطلاعات مقاله منقضی شده است.")
+        return
+
+    content = generate_bibtex([paper])
+    doc_file = BufferedInputFile(content.encode("utf-8"), filename=f"paper_{short_id}.bib")
+    if callback.message:
+        try:
+            await callback.message.answer_document(document=doc_file, caption="📚 فایل BibTeX مقاله")
+        except Exception as e:
+            logger.warning(f"Error sending BibTeX file: {e}")
+
+
+@router.callback_query(F.data.startswith("dlris:"))
+async def handle_download_ris_callback(callback: CallbackQuery):
+    """Handle RIS file download."""
+    await callback.answer("📥 در حال ساخت فایل RIS...")
+
+    parts = callback.data.split(":", 1)
+    if len(parts) < 2:
+        return
+
+    short_id = parts[1]
+    paper = await db.get_paper(short_id)
+
+    if not paper:
+        if callback.message:
+            await safe_send_message(callback.message, "⚠️ اطلاعات مقاله منقضی شده است.")
+        return
+
+    content = generate_ris([paper])
+    doc_file = BufferedInputFile(content.encode("utf-8"), filename=f"paper_{short_id}.ris")
+    if callback.message:
+        try:
+            await callback.message.answer_document(document=doc_file, caption="🗂 فایل RIS مقاله (EndNote/Mendeley)")
+        except Exception as e:
+            logger.warning(f"Error sending RIS file: {e}")
+
+
+@router.callback_query(F.data.startswith("relp:"))
+async def handle_related_papers_callback(callback: CallbackQuery):
+    """Handle related papers discovery."""
+    await callback.answer("🕸 در حال جستجوی مقالات مشابه...")
+
+    parts = callback.data.split(":", 1)
+    if len(parts) < 2:
+        return
+
+    short_id = parts[1]
+    paper = await db.get_paper(short_id)
+
+    if not paper:
+        if callback.message:
+            await safe_send_message(callback.message, "⚠️ اطلاعات این مقاله در حافظه منقضی شده است.")
+        return
+
+    safe_title_preview = safe_html(paper.title, 100)
+    wait_msg = None
+    if callback.message:
+        wait_msg = await safe_send_message(
+            callback.message,
+            f"🕸 در حال یافتن مقالات مشابه با:\n<b>{safe_title_preview}</b>..."
+        )
+
+    related_papers = await aggregator.get_related_papers(paper, limit=10)
+
+    if wait_msg:
+        try:
+            await wait_msg.delete()
+        except Exception:
+            pass
+
+    if not related_papers:
+        if callback.message:
+            await safe_send_message(callback.message, "❌ مقاله مشابهی یافت نشد.")
+        return
+
+    await db.save_papers_batch(related_papers)
+
+    safe_original = safe_html(paper.title, 60)
+    lines = [f"🕸 <b>مقالات مشابه با:</b> «{safe_original}»\n"]
+    for idx, rp in enumerate(related_papers, 1):
+        icon = "🟢" if rp.pdf_url else "🟡"
+        safe_t = safe_html(rp.title, 85)
+        safe_y = safe_html(rp.year, 10) or "نامشخص"
+        lines.append(f"<b>{idx}.</b> {icon} <b>{safe_t}</b> ({safe_y})")
+
+    text = "\n".join(lines)[:3800]
+    kb = build_results_list_keyboard(related_papers, start_idx=1)
+    if callback.message:
+        await safe_send_message(callback.message, text, reply_markup=kb, disable_web_page_preview=True)
+
+
+@router.callback_query(F.data.startswith("save:"))
+async def handle_save_callback(callback: CallbackQuery):
+    """Handle bookmark toggle."""
+    parts = callback.data.split(":", 1)
+    if len(parts) < 2 or not callback.from_user:
+        await callback.answer()
+        return
+
+    short_id = parts[1]
+    paper = await db.get_paper(short_id)
+
+    if not paper:
+        await callback.answer("⚠️ اطلاعات مقاله منقضی شده است.")
+        return
+
+    is_now_saved = await db.toggle_bookmark(callback.from_user.id, short_id)
+
+    if is_now_saved:
+        await callback.answer("✅ به کتابخانه شخصی (/saved) اضافه شد.")
+    else:
+        await callback.answer("🗑 از کتابخانه شخصی حذف شد.")
+
+    # Update keyboard to reflect new bookmark state
+    try:
+        if callback.message:
+            await callback.message.edit_reply_markup(
+                reply_markup=build_paper_keyboard(paper, is_saved=is_now_saved)
+            )
+    except TelegramBadRequest:
+        pass
+    except Exception as e:
+        logger.warning(f"Error updating bookmark keyboard: {e}")
+
+
+@router.callback_query(F.data.startswith("exp:"))
+async def handle_export_callback(callback: CallbackQuery):
+    """Handle library export (CSV, BibTeX, RIS) and clear."""
+    await callback.answer()
+
+    if not callback.from_user:
+        return
+
+    parts = callback.data.split(":", 1)
+    if len(parts) < 2:
+        return
+
+    export_type = parts[1]
+
+    if export_type == "clear":
+        await db.clear_user_bookmarks(callback.from_user.id)
+        if callback.message:
+            await safe_edit_text(
+                callback.message,
+                "🗑 <b>کتابخانه شخصی شما با موفقیت پاک شد.</b>\n\n"
+                "💡 برای ذخیره مقاله جدید، پس از جستجو دکمه «⭐️ ذخیره مقاله» را بزنید."
+            )
+        return
+
+    papers = await db.get_user_bookmarks(callback.from_user.id)
+    if not papers:
+        if callback.message:
+            await safe_send_message(callback.message, "📚 کتابخانه شخصی شما خالی است.")
+        return
+
+    if export_type == "csv":
+        content = generate_csv_bytes(papers)
+        doc_file = BufferedInputFile(content, filename="saved_papers.csv")
+        caption = f"📊 خروجی اکسل — {len(papers)} مقاله ذخیره‌شده"
+    elif export_type == "bib":
+        content = generate_bibtex(papers).encode("utf-8")
+        doc_file = BufferedInputFile(content, filename="saved_papers.bib")
+        caption = f"📚 خروجی BibTeX — {len(papers)} مقاله ذخیره‌شده"
+    elif export_type == "ris":
+        content = generate_ris(papers).encode("utf-8")
+        doc_file = BufferedInputFile(content, filename="saved_papers.ris")
+        caption = f"🗂 خروجی RIS (EndNote) — {len(papers)} مقاله ذخیره‌شده"
+    else:
+        return
+
+    if callback.message:
+        try:
+            await callback.message.answer_document(document=doc_file, caption=caption[:1000])
+        except Exception as e:
+            logger.warning(f"Error sending export file: {e}")
 
 
 @router.callback_query(F.data.startswith("pdf:"))

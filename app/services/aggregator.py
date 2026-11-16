@@ -1,5 +1,7 @@
 import asyncio
+import csv
 import html
+import io
 import logging
 import re
 import xml.etree.ElementTree as ET
@@ -138,6 +140,201 @@ def merge_paper_items(existing: PaperItem, new_item: PaperItem) -> None:
     if not existing.landing_url and new_item.landing_url:
         existing.landing_url = new_item.landing_url
 
+    # 9. Merge tldr
+    if not existing.tldr and new_item.tldr:
+        existing.tldr = new_item.tldr
+
+    # 10. Merge publisher
+    if not existing.publisher and new_item.publisher:
+        existing.publisher = new_item.publisher
+
+
+def extract_multiple_dois(text: str) -> list[str]:
+    """Extract unique clean DOIs if message contains multiple DOIs."""
+    if not text:
+        return []
+    matches = DOI_REGEX.findall(text)
+    seen = set()
+    result = []
+    for m in matches:
+        c = clean_doi(m)
+        if c and c.lower() not in seen:
+            seen.add(c.lower())
+            result.append(c)
+    return result
+
+
+def filter_and_sort_papers(papers: list[PaperItem], mode: str) -> list[PaperItem]:
+    """Filter and sort papers by the given mode: cit, new, oa, rel."""
+    if not papers:
+        return papers
+
+    if mode == "cit":
+        return sorted(papers, key=lambda p: p.citation_count or 0, reverse=True)
+
+    if mode == "new":
+        def _year_key(p: PaperItem) -> int:
+            try:
+                y = int(p.year)
+                if 1900 <= y <= 2100:
+                    return y
+            except (ValueError, TypeError):
+                pass
+            return 0
+        return sorted(papers, key=_year_key, reverse=True)
+
+    if mode == "oa":
+        with_pdf = [p for p in papers if p.pdf_url and str(p.pdf_url).startswith("http")]
+        without_pdf = [p for p in papers if not (p.pdf_url and str(p.pdf_url).startswith("http"))]
+        if with_pdf:
+            return with_pdf + without_pdf
+        return papers
+
+    # mode == "rel" or unknown: return original order
+    return list(papers)
+
+
+def _extract_first_sentence(text: str, max_len: int = 180) -> str:
+    """Extract the first complete sentence from text, up to max_len characters."""
+    if not text:
+        return ""
+    # Match first sentence ending with . ! or ?
+    match = re.match(r"^(.+?[.!?])\s", text)
+    if match:
+        sentence = match.group(1).strip()
+        if len(sentence) <= max_len:
+            return sentence
+    return text[:max_len].rsplit(" ", 1)[0] + "..." if len(text) > max_len else text
+
+
+# ── Citation / Reference Generators ──────────────────────────────────
+
+def generate_citations(paper: PaperItem) -> dict[str, str]:
+    """Generate APA, IEEE, and Vancouver citation strings for a paper."""
+    authors = paper.authors or "نامشخص"
+    year = paper.year or "نامشخص"
+    title = paper.title or "بدون عنوان"
+    venue = paper.venue if paper.venue and paper.venue not in {"نامشخص", "OpenAlex", "Crossref", "Semantic Scholar"} else ""
+    doi_link = ""
+    if paper.doi:
+        clean_d = clean_doi(paper.doi)
+        if clean_d:
+            doi_link = f"https://doi.org/{quote(clean_d, safe='/')}"
+
+    # APA format
+    apa = f"{authors} ({year}). {title}."
+    if venue:
+        apa += f" {venue}."
+    if doi_link:
+        apa += f" {doi_link}"
+
+    # IEEE format
+    ieee = f'{authors}, "{title},"'
+    if venue:
+        ieee += f" {venue},"
+    ieee += f" {year}."
+    if doi_link:
+        ieee += f" doi: {doi_link}"
+
+    # Vancouver format
+    vancouver = f"{authors}. {title}."
+    if venue:
+        vancouver += f" {venue}."
+    vancouver += f" {year}."
+    if doi_link:
+        vancouver += f" doi: {doi_link}"
+
+    return {
+        "apa": apa,
+        "ieee": ieee,
+        "vancouver": vancouver
+    }
+
+
+def generate_bibtex(papers: list[PaperItem]) -> str:
+    """Generate BibTeX entries for a list of papers."""
+    entries = []
+    for i, p in enumerate(papers, 1):
+        # Create a cite key from first author surname + year
+        first_author = (p.authors or "unknown").split(",")[0].split()[-1] if p.authors else "unknown"
+        cite_key = re.sub(r"[^a-zA-Z0-9]", "", first_author.lower()) + str(p.year or "0000")
+        if i > 1 or cite_key in [e.split("{")[1].split(",")[0] for e in entries if "{" in e]:
+            cite_key += f"_{i}"
+
+        doi_line = f"  doi = {{{clean_doi(p.doi) or ''}}},\n" if p.doi else ""
+        url_line = f"  url = {{{p.landing_url or ''}}},\n" if p.landing_url else ""
+        venue_name = p.venue if p.venue and p.venue not in {"نامشخص", "OpenAlex", "Crossref", "Semantic Scholar"} else ""
+
+        entry = (
+            f"@article{{{cite_key},\n"
+            f"  title = {{{p.title or ''}}},\n"
+            f"  author = {{{p.authors or ''}}},\n"
+            f"  journal = {{{venue_name}}},\n"
+            f"  year = {{{p.year or ''}}},\n"
+            f"{doi_line}"
+            f"{url_line}"
+            f"}}"
+        )
+        entries.append(entry)
+    return "\n\n".join(entries)
+
+
+def generate_ris(papers: list[PaperItem]) -> str:
+    """Generate RIS entries for a list of papers (compatible with EndNote, Mendeley)."""
+    entries = []
+    for p in papers:
+        lines = ["TY  - JOUR"]
+        if p.title:
+            lines.append(f"TI  - {p.title}")
+        if p.authors:
+            for author in p.authors.replace(" et al.", "").split(", "):
+                author = author.strip()
+                if author:
+                    lines.append(f"AU  - {author}")
+        if p.year and p.year != "نامشخص":
+            lines.append(f"PY  - {p.year}")
+        venue_name = p.venue if p.venue and p.venue not in {"نامشخص", "OpenAlex", "Crossref", "Semantic Scholar"} else ""
+        if venue_name:
+            lines.append(f"JO  - {venue_name}")
+        if p.doi:
+            clean_d = clean_doi(p.doi)
+            if clean_d:
+                lines.append(f"DO  - {clean_d}")
+        if p.landing_url:
+            lines.append(f"UR  - {p.landing_url}")
+        if p.abstract and p.abstract.strip() not in {
+            "چکیده‌ای برای این مقاله ثبت نشده است.",
+            "چکیده‌ای برای این مقاله در پایگاه ثبت نشده است.",
+            "چکیده‌ای برای این مقاله در دسترس نیست.",
+            "بدون چکیده", "چکیده‌ای ثبت نشده است."
+        }:
+            lines.append(f"AB  - {p.abstract[:1500]}")
+        lines.append("ER  - ")
+        entries.append("\n".join(lines))
+    return "\n\n".join(entries)
+
+
+def generate_csv_bytes(papers: list[PaperItem]) -> bytes:
+    """Generate CSV bytes with BOM for proper Excel/Unicode support."""
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Row", "Title", "Authors", "Year", "Venue", "Publisher", "Citations", "DOI", "PDF_URL", "Landing_URL", "Abstract"])
+    for i, p in enumerate(papers, 1):
+        writer.writerow([
+            i,
+            p.title or "",
+            p.authors or "",
+            p.year or "",
+            p.venue or "",
+            p.publisher or "",
+            p.citation_count or 0,
+            clean_doi(p.doi) if p.doi else "",
+            p.pdf_url or "",
+            p.landing_url or "",
+            (p.abstract or "")[:500]
+        ])
+    return output.getvalue().encode("utf-8-sig")
+
 
 class PaperAggregator:
     def __init__(self):
@@ -211,6 +408,24 @@ class PaperAggregator:
         if not arxiv_id:
             arxiv_id = clean_arxiv_id(landing_url) or clean_arxiv_id(pdf_url)
 
+        # Publisher & source type extraction
+        publisher = None
+        host_org = source_info.get("host_organization_name")
+        source_type = source_info.get("type")
+        if host_org:
+            publisher = f"{host_org} ({source_type})" if source_type else host_org
+
+        # TL;DR: first complete sentence of abstract if available
+        tldr = None
+        empty_abstracts = {
+            "چکیده‌ای برای این مقاله ثبت نشده است.",
+            "چکیده‌ای برای این مقاله در پایگاه ثبت نشده است.",
+            "چکیده‌ای برای این مقاله در دسترس نیست.",
+            "بدون چکیده"
+        }
+        if abstract and abstract.strip() not in empty_abstracts:
+            tldr = _extract_first_sentence(abstract, 180)
+
         return PaperItem(
             title=title.strip(),
             authors=authors,
@@ -222,7 +437,9 @@ class PaperAggregator:
             landing_url=landing_url,
             source="OpenAlex",
             citation_count=citations,
-            arxiv_id=arxiv_id
+            arxiv_id=arxiv_id,
+            tldr=tldr,
+            publisher=publisher
         )
 
     def _extract_crossref_year(self, item: dict) -> str:
@@ -294,6 +511,9 @@ class PaperAggregator:
 
         landing_url = item.get("URL") or (f"https://doi.org/{quote(doi, safe='/')}" if doi else None)
 
+        # Publisher extraction from Crossref
+        publisher = item.get("publisher") or None
+
         return PaperItem(
             title=title,
             authors=authors,
@@ -304,7 +524,8 @@ class PaperAggregator:
             pdf_url=pdf_url,
             landing_url=landing_url,
             source="Crossref",
-            citation_count=citations
+            citation_count=citations,
+            publisher=publisher
         )
 
     async def search_openalex(self, query: str, limit: int = 12, page: int = 1) -> list[PaperItem]:
@@ -428,7 +649,7 @@ class PaperAggregator:
             "query": query,
             "limit": limit,
             "offset": offset,
-            "fields": "title,authors,year,venue,abstract,externalIds,openAccessPdf,citationCount,url"
+            "fields": "title,authors,year,venue,abstract,externalIds,openAccessPdf,citationCount,url,tldr"
         }
         results = []
         try:
@@ -446,6 +667,7 @@ class PaperAggregator:
                         doi = clean_doi(ext_ids.get("DOI"))
                         arxiv_id = clean_arxiv_id(ext_ids.get("ArXiv"))
                         oa_pdf = (item.get("openAccessPdf") or {}).get("url")
+                        tldr_text = (item.get("tldr") or {}).get("text")
                         results.append(PaperItem(
                             title=title,
                             authors=authors,
@@ -457,7 +679,8 @@ class PaperAggregator:
                             landing_url=item.get("url"),
                             source="SemanticScholar",
                             citation_count=item.get("citationCount") or 0,
-                            arxiv_id=arxiv_id
+                            arxiv_id=arxiv_id,
+                            tldr=tldr_text
                         ))
         except Exception as e:
             logger.warning(f"Semantic Scholar search error: {e}")
@@ -516,6 +739,22 @@ class PaperAggregator:
                 logger.warning(f"Direct Crossref lookup failed for DOI {clean_d}: {e}")
 
         return None
+
+    async def lookup_multiple_dois(self, dois: list[str]) -> list[PaperItem]:
+        """Lookup multiple DOIs concurrently (max 10, concurrency 4)."""
+        sem = asyncio.Semaphore(4)
+        results: list[PaperItem] = []
+
+        async def _lookup(d: str):
+            async with sem:
+                return await self.lookup_by_identifier(d)
+
+        tasks = [_lookup(d) for d in dois[:10]]
+        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        for outcome in outcomes:
+            if isinstance(outcome, PaperItem):
+                results.append(outcome)
+        return results
 
     async def search_papers(self, query: str, page: int = 1, page_size: int = settings.MAX_RESULTS) -> list[PaperItem]:
         """Aggregate search across OpenAlex, arXiv, Semantic Scholar, and Crossref with comprehensive Deduplication and Merging."""
@@ -837,6 +1076,97 @@ class PaperAggregator:
             logger.warning(f"httpx download fallback failed for {pdf_url}: {e}")
 
         return None
+
+    async def translate_to_persian(self, text: str) -> Optional[str]:
+        """Translate text to Persian using Google Translate free endpoint."""
+        if not text or not text.strip():
+            return None
+        url = "https://translate.googleapis.com/translate_a/single"
+        params = {
+            "client": "gtx",
+            "sl": "auto",
+            "tl": "fa",
+            "dt": "t",
+            "q": text[:2500]
+        }
+        try:
+            async with self._get_httpx_client() as client:
+                resp = await client.get(url, params=params)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
+                        translated_parts = [part[0] for part in data[0] if isinstance(part, list) and len(part) > 0 and part[0]]
+                        return "".join(translated_parts).strip()
+        except Exception as e:
+            logger.warning(f"Translation error: {e}")
+        return None
+
+    async def get_related_papers(self, paper: PaperItem, limit: int = 10) -> list[PaperItem]:
+        """Find related papers using Semantic Scholar recommendations or OpenAlex title search."""
+        results: list[PaperItem] = []
+
+        # 1. Try Semantic Scholar recommendations API if DOI is available
+        if paper.doi:
+            clean_d = clean_doi(paper.doi)
+            if clean_d:
+                try:
+                    rec_url = f"https://api.semanticscholar.org/recommendations/v1/papers/forpaper/DOI:{quote(clean_d, safe='')}"
+                    params = {
+                        "fields": "title,authors,year,venue,abstract,externalIds,openAccessPdf,citationCount,url,tldr",
+                        "limit": limit
+                    }
+                    async with self._get_httpx_client() as client:
+                        resp = await client.get(rec_url, params=params)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            for item in data.get("recommendedPapers", []):
+                                title = item.get("title")
+                                if not title:
+                                    continue
+                                auth_list = [a.get("name", "") for a in item.get("authors", [])[:4] if a.get("name")]
+                                authors = ", ".join(auth_list) or "نامشخص"
+                                ext_ids = item.get("externalIds") or {}
+                                doi = clean_doi(ext_ids.get("DOI"))
+                                arxiv_id = clean_arxiv_id(ext_ids.get("ArXiv"))
+                                oa_pdf = (item.get("openAccessPdf") or {}).get("url")
+                                tldr_text = (item.get("tldr") or {}).get("text")
+                                results.append(PaperItem(
+                                    title=title,
+                                    authors=authors,
+                                    year=str(item.get("year") or "نامشخص"),
+                                    venue=item.get("venue") or "Semantic Scholar",
+                                    abstract=(item.get("abstract") or "چکیده‌ای ثبت نشده است.")[:1800],
+                                    doi=doi,
+                                    pdf_url=oa_pdf,
+                                    landing_url=item.get("url"),
+                                    source="SemanticScholar",
+                                    citation_count=item.get("citationCount") or 0,
+                                    arxiv_id=arxiv_id,
+                                    tldr=tldr_text
+                                ))
+                except Exception as e:
+                    logger.warning(f"Semantic Scholar recommendations error: {e}")
+
+        # 2. Fallback: search OpenAlex by title if no results
+        if not results and paper.title:
+            try:
+                oa_results = await self.search_openalex(paper.title, limit=limit + 2)
+                # Remove the original paper from results
+                current_norm = normalize_title(paper.title)
+                current_doi = paper.doi.lower().strip() if paper.doi else None
+                for r in oa_results:
+                    r_norm = normalize_title(r.title)
+                    r_doi = r.doi.lower().strip() if r.doi else None
+                    # Skip the original paper
+                    if (current_doi and r_doi and current_doi == r_doi) or (current_norm and r_norm and current_norm == r_norm):
+                        continue
+                    results.append(r)
+                    if len(results) >= limit:
+                        break
+            except Exception as e:
+                logger.warning(f"OpenAlex related papers fallback error: {e}")
+
+        return results[:limit]
 
 
 aggregator = PaperAggregator()
