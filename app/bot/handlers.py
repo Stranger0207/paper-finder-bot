@@ -170,7 +170,10 @@ def format_papers_list_message(
 async def cmd_start(message: Message):
     user = message.from_user
     if user:
-        await db.register_or_update_user(user.id, user.username, user.full_name)
+        try:
+            await db.register_or_update_user(user.id, user.username, user.full_name)
+        except Exception as e:
+            logger.warning(f"Error registering user {user.id}: {e}")
 
     welcome_text = (
         "🎓 <b>به ربات هوشمند مقاله‌یاب (Paper Finder Bot) خوش آمدید!</b>\n\n"

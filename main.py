@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import sys
+from typing import Optional
 from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -30,16 +31,20 @@ async def healthcheck_handler(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok", "service": "Paper Finder Telegram Bot"})
 
 
-async def start_healthcheck_server() -> web.AppRunner:
-    app = web.Application()
-    app.router.add_get("/", healthcheck_handler)
-    app.router.add_get("/health", healthcheck_handler)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, host="0.0.0.0", port=settings.PORT)
-    await site.start()
-    logger.info(f"Healthcheck server running on http://0.0.0.0:{settings.PORT}")
-    return runner
+async def start_healthcheck_server() -> Optional[web.AppRunner]:
+    try:
+        app = web.Application()
+        app.router.add_get("/", healthcheck_handler)
+        app.router.add_get("/health", healthcheck_handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, host="0.0.0.0", port=settings.PORT)
+        await site.start()
+        logger.info(f"Healthcheck server running on http://0.0.0.0:{settings.PORT}")
+        return runner
+    except Exception as e:
+        logger.warning(f"Healthcheck server could not start on port {settings.PORT}: {e}")
+        return None
 
 
 async def main():
@@ -72,7 +77,8 @@ async def main():
         logger.info("Bot polling started successfully!")
         await dp.start_polling(bot)
     finally:
-        await health_runner.cleanup()
+        if health_runner:
+            await health_runner.cleanup()
         await bot.session.close()
 
 

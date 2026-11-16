@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     @property
     def is_bot_token_valid(self) -> bool:
         """Check if BOT_TOKEN is provided and not a placeholder."""
-        raw_token = (self.BOT_TOKEN or "").strip()
+        raw_token = (self.BOT_TOKEN or "").strip().strip("\"'")
         token_lower = raw_token.lower()
         token_placeholders = [
             "your_bot_token_here",
@@ -56,7 +56,7 @@ class Settings(BaseSettings):
         ]
         if not raw_token or any(p in token_lower for p in token_placeholders):
             return False
-        return bool(re.match(r"^\d{8,11}:[A-Za-z0-9_-]{35,}$", raw_token))
+        return bool(re.match(r"^\d+:[A-Za-z0-9_-]+$", raw_token))
 
     @property
     def is_unpaywall_email_valid(self) -> bool:
@@ -103,7 +103,7 @@ class Settings(BaseSettings):
                 f"❌ [CONFIG ERROR] BOT_TOKEN contains default placeholder text: '{raw_token}'. "
                 "Please replace it with your real Telegram Bot Token from @BotFather in your .env file."
             )
-        elif not re.match(r"^\d{8,11}:[A-Za-z0-9_-]{35,}$", raw_token):
+        elif not re.match(r"^\d+:[A-Za-z0-9_-]+$", raw_token.strip("\"'")):
             logger.warning(
                 f"⚠️ [CONFIG WARNING] BOT_TOKEN format looks unusual ('{raw_token[:10]}...'). "
                 "Ensure it matches standard Telegram Bot token structure (<digits>:<token>)."
