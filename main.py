@@ -36,6 +36,7 @@ async def start_healthcheck_server() -> web.AppRunner:
 
 
 async def main():
+    settings.validate_credentials()
     await db.init_db()
     health_runner = await start_healthcheck_server()
 

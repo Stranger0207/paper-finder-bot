@@ -276,7 +276,7 @@ class PaperAggregator:
         url = f"https://api.unpaywall.org/v2/{quote(doi)}"
         try:
             async with self._get_httpx_client() as client:
-                resp = await client.get(url, params={"email": settings.CONTACT_EMAIL})
+                resp = await client.get(url, params={"email": settings.UNPAYWALL_EMAIL or settings.CONTACT_EMAIL})
                 if resp.status_code == 200:
                     data = resp.json()
                     best_oa = data.get("best_oa_location") or {}
