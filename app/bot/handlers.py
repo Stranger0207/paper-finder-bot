@@ -398,22 +398,6 @@ async def cmd_subscribe(message: Message):
         )
 
 
-@router.message(Command("vip"))
-async def cmd_vip(message: Message):
-    """Developer/admin shortcut to grant 1-year premium to oneself or target user."""
-    if not message.from_user:
-        return
-    args = (message.text or "").split()
-    target_id = message.from_user.id
-    if len(args) > 1 and args[1].lstrip("-").isdigit():
-        target_id = int(args[1])
-    await db.set_user_premium(target_id, status=1, days=365)
-    await safe_send_message(
-        message,
-        f"💎 <b>اشتراک ویژه ۱ ساله برای کاربر <code>{target_id}</code> فعال شد!</b>\n\n"
-        "هم‌اکنون تمامی قابلیت‌های ویژه از جمله ترجمه فارسی، دانلود رفرنس، مقالات مشابه و ذخیره در دسترس است."
-    )
-
 
 @router.callback_query(F.data == "buy_sub")
 async def handle_buy_sub_callback(callback: CallbackQuery):
