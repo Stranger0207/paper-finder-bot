@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     MAX_RESULTS: int = 20
     MAX_PDF_SIZE_MB: int = 45
     ADMIN_GROUP_ID: int = -1003989191024
+    DAILY_SEARCH_LIMIT: int = 10
 
     model_config = SettingsConfigDict(
         env_file=(str(BASE_DIR / ".env"), ".env"),

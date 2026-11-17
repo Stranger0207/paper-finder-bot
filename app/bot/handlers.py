@@ -26,7 +26,8 @@ from app.services.models import PaperItem
 from app.bot.keyboards import (
     build_paper_keyboard, build_results_list_keyboard,
     build_cite_keyboard, build_saved_library_keyboard,
-    build_subscription_keyboard, build_admin_receipt_keyboard
+    build_subscription_keyboard, build_active_subscription_keyboard,
+    build_admin_receipt_keyboard
 )
 
 logger = logging.getLogger(__name__)
@@ -197,9 +198,10 @@ def format_papers_list_message(
 PREMIUM_PROMO_TEXT = (
     "💎 <b>این قابلیت مخصوص کاربران دارای اشتراک ویژه است!</b>\n\n"
     "✨ <b>با خرید اشتراک ویژه یکماهه (۵۰,۰۰۰ تومان)، به امکانات زیر دسترسی کامل خواهید داشت:</b>\n"
-    "• 🔍 مشاهده و جستجوی نتایج بیشتر از ۲۰ مقاله\n"
-    "• ⭐️ ذخیره مقالات در کتابخانه شخصی\n"
-    "• 🕸 دسترسی به مقالات مشابه\n"
+    "• ♾ جستجوی نامحدود مقالات بدون سقف روزانه (سقف عادی: ۱۰ جستجو در ۲۴ ساعت)\n"
+    "• 🔍 مشاهده و جستجوی نتایج بیشتر از ۲۰ مقاله (صفحات بعدی)\n"
+    "• ⭐️ ذخیره مقالات در کتابخانه شخصی (/saved)\n"
+    "• 🕸 دسترسی به شبکه مقالات مشابه\n"
     "• 📎 دریافت رفرنس استاندارد (APA, IEEE, Vancouver, BibTeX, RIS)\n"
     "• 🇮🇷 ترجمه نامحدود چکیده مقالات به فارسی روان\n\n"
     "💳 <b>شماره کارت واریز:</b> <code>6219861843148577</code> (به نام رضایی - بلوبانک)\n"
@@ -290,12 +292,22 @@ async def cmd_stats(message: Message):
     if not message.from_user:
         return
     stats = await db.get_user_stats(message.from_user.id)
-    prem_status = "💎 فعال (ویژه)" if stats.get("is_premium") else "عادی (رایگان)"
+    is_prem = stats.get("is_premium")
+    prem_status = "💎 فعال (ویژه)" if is_prem else "عادی (رایگان)"
     expires_line = f"\n⏳ انقضای اشتراک: <code>{stats.get('premium_expires_at')}</code>" if stats.get("premium_expires_at") else ""
+
+    if is_prem:
+        quota_line = "♾ <b>نامحدود</b>"
+    else:
+        recent_24h = stats.get("recent_searches_24h", 0)
+        daily_limit = stats.get("daily_limit", settings.DAILY_SEARCH_LIMIT)
+        quota_line = f"<b>{recent_24h} از {daily_limit}</b> (در ۲۴ ساعت اخیر)"
+
     text = (
         f"📊 <b>آمار فعالیت شما:</b>\n\n"
         f"👑 وضعیت اشتراک: <b>{prem_status}</b>{expires_line}\n"
-        f"🔎 تعداد جستجوهای شما: <b>{stats['user_searches']}</b>\n"
+        f"🔎 سقف جستجوی روزانه: {quota_line}\n"
+        f"📈 مجموع کل جستجوهای شما: <b>{stats['user_searches']}</b>\n"
         f"🗂 مقالات کش‌شده در پایگاه: <b>{stats['total_cached_papers']}</b>"
     )
     await safe_send_message(message, text[:4000])
@@ -334,14 +346,56 @@ async def cmd_saved(message: Message):
 SUBSCRIPTION_TEXT = PREMIUM_PROMO_TEXT
 
 
+def format_active_subscription_message(sub_info: dict) -> str:
+    """Format rich subscription overview for active premium subscribers without bank/card details."""
+    if sub_info.get("is_lifetime"):
+        time_left_str = "♾ <b>دائمی / نامحدود</b>"
+        exp_date_str = "نامحدود"
+    else:
+        days = sub_info.get("remaining_days", 0)
+        hours = sub_info.get("remaining_hours", 0)
+        if days > 0:
+            time_left_str = f"<b>{days} روز</b> و <b>{hours} ساعت</b>"
+        else:
+            time_left_str = f"<b>{hours} ساعت</b> (کمتر از ۱ روز باقیمانده)"
+        exp_date_str = sub_info.get("expires_at") or "نامشخص"
+
+    text = (
+        "💎 <b>اشتراک ویژه شما فعال است</b>\n\n"
+        f"⏳ <b>اعتبار باقیمانده:</b> {time_left_str}\n"
+        f"📅 <b>تاریخ انقضا:</b> <code>{exp_date_str}</code>\n"
+        "🔎 <b>سقف مجاز جستجو:</b> ♾ <b>کاملاً نامحدود</b>\n\n"
+        "✨ <b>امکانات فعال شما در این دوره:</b>\n"
+        "• 🔍 جستجوی کاملاً نامحدود مقالات بدون سقف ۲۴ ساعته\n"
+        "• 📄 مشاهده صفحات بعدی و دریافت بیش از ۲۰ نتیجه\n"
+        "• 🇮🇷 ترجمه روان و نامحدود چکیده و تایتل مقالات به زبان فارسی\n"
+        "• ⭐️ ذخیره در کتابخانه شخصی (/saved) با خروجی‌های متنوع\n"
+        "• 📎 دریافت رفرنس‌های دانشگاهی استاندارد (APA, IEEE, Vancouver)\n"
+        "• 🕸 کاوش در شبکه مقالات مشابه و مرتبط\n\n"
+        "💡 برای جستجو کافیست عنوان مقاله یا کلیدواژه مورد نظر را ارسال کنید."
+    )
+    return text[:4000]
+
+
 @router.message(Command("subscribe"))
 async def cmd_subscribe(message: Message):
-    """Handle /subscribe command to display subscription details and payment info."""
-    await safe_send_message(
-        message,
-        SUBSCRIPTION_TEXT,
-        reply_markup=build_subscription_keyboard()
-    )
+    """Handle /subscribe command: shows active status and remaining days for premium users,
+    or bank card details and payment guidance for regular/unsubscribed users."""
+    if not message.from_user:
+        return
+    sub_info = await db.get_user_subscription_details(message.from_user.id)
+    if sub_info.get("is_active"):
+        await safe_send_message(
+            message,
+            format_active_subscription_message(sub_info),
+            reply_markup=build_active_subscription_keyboard()
+        )
+    else:
+        await safe_send_message(
+            message,
+            SUBSCRIPTION_TEXT,
+            reply_markup=build_subscription_keyboard()
+        )
 
 
 @router.message(Command("vip"))
@@ -379,21 +433,83 @@ async def handle_check_sub_status(callback: CallbackQuery):
     await callback.answer()
     if not callback.from_user or not callback.message:
         return
-    is_prem, expires_at = await db.get_user_premium_info(callback.from_user.id)
-    if is_prem:
-        exp_text = f"<code>{expires_at}</code>" if expires_at else "نامحدود"
-        status_text = (
-            "💎 <b>وضعیت اشتراک: فعال (ویژه)</b>\n\n"
-            f"⏳ <b>تاریخ انقضا:</b> {exp_text}\n\n"
-            "✨ هم‌اکنون به تمامی ۵ قابلیت ویژه (مشاهده بیش از ۲۰ نتیجه، ذخیره مقالات، مقالات مشابه، دریافت رفرنس و ترجمه فارسی) دسترسی کامل دارید!"
+    sub_info = await db.get_user_subscription_details(callback.from_user.id)
+    if sub_info.get("is_active"):
+        await safe_send_message(
+            callback.message,
+            format_active_subscription_message(sub_info),
+            reply_markup=build_active_subscription_keyboard()
         )
     else:
         status_text = (
             "📊 <b>وضعیت اشتراک: عادی (رایگان)</b>\n\n"
             "❌ شما در حال حاضر اشتراک ویژه فعال ندارید.\n\n"
-            "برای فعال‌سازی و دسترسی به ۵ قابلیت ویژه (مشاهده بیش از ۲۰ نتیجه، ذخیره مقالات، مقالات مشابه، رفرنس‌دهی و ترجمه فارسی چکیده) روی دکمه <b>«💳 خرید اشتراک ویژه»</b> کلیک کنید."
+            "برای فعال‌سازی و دسترسی به امکانات ویژه (جستجوی نامحدود، ترجمه فارسی، ذخیره مقالات، رفرنس‌دهی و مقالات مشابه) روی دکمه <b>«💳 خرید اشتراک ویژه»</b> کلیک کنید."
         )
-    await safe_send_message(callback.message, status_text, reply_markup=build_subscription_keyboard())
+        await safe_send_message(callback.message, status_text, reply_markup=build_subscription_keyboard())
+
+
+@router.callback_query(F.data == "renew_sub")
+async def handle_renew_sub_callback(callback: CallbackQuery):
+    """Handle early subscription renewal request from active premium users."""
+    await callback.answer()
+    if callback.message:
+        renew_header = (
+            "🔄 <b>تمدید اشتراک ویژه:</b>\n"
+            "<i>(با واریز و تایید رسید، ۳۰ روز به انتهای اعتبار فعلی شما افزوده می‌شود.)</i>\n\n"
+        )
+        await safe_send_message(
+            callback.message,
+            renew_header + SUBSCRIPTION_TEXT,
+            reply_markup=build_subscription_keyboard()
+        )
+
+
+@router.callback_query(F.data == "sub_lib")
+async def handle_sub_lib_callback(callback: CallbackQuery):
+    """Shortcut to view saved library from subscription keyboard."""
+    await callback.answer()
+    if not callback.from_user or not callback.message:
+        return
+    papers = await db.get_user_bookmarks(callback.from_user.id)
+    if not papers:
+        await safe_send_message(
+            callback.message,
+            "📚 <b>کتابخانه شخصی شما خالی است.</b>\n\n"
+            "💡 برای ذخیره مقاله، پس از جستجو و مشاهده کارت مقاله، دکمه <b>«⭐️ ذخیره مقاله»</b> را بزنید."
+        )
+        return
+    lines = [f"📚 <b>کتابخانه شخصی شما ({len(papers)} مقاله):</b>\n"]
+    for idx, p in enumerate(papers, 1):
+        icon = "🟢" if p.pdf_url else "🟡"
+        safe_title = safe_html(p.title, 85)
+        safe_year = safe_html(p.year, 10) or "نامشخص"
+        lines.append(f"<b>{idx}.</b> {icon} <b>{safe_title}</b> ({safe_year})")
+    text = "\n".join(lines)[:3800]
+    kb = build_saved_library_keyboard(papers)
+    await safe_send_message(callback.message, text, reply_markup=kb, disable_web_page_preview=True)
+
+
+@router.callback_query(F.data == "sub_stats")
+async def handle_sub_stats_callback(callback: CallbackQuery):
+    """Shortcut to view user stats from subscription keyboard."""
+    await callback.answer()
+    if not callback.from_user or not callback.message:
+        return
+    stats = await db.get_user_stats(callback.from_user.id)
+    is_prem = stats.get("is_premium")
+    prem_status = "💎 فعال (ویژه)" if is_prem else "عادی (رایگان)"
+    expires_line = f"\n⏳ انقضای اشتراک: <code>{stats.get('premium_expires_at')}</code>" if stats.get("premium_expires_at") else ""
+    quota_line = "♾ <b>نامحدود</b>" if is_prem else f"<b>{stats.get('recent_searches_24h', 0)} از {stats.get('daily_limit', settings.DAILY_SEARCH_LIMIT)}</b> (در ۲۴ ساعت اخیر)"
+
+    text = (
+        f"📊 <b>آمار فعالیت شما:</b>\n\n"
+        f"👑 وضعیت اشتراک: <b>{prem_status}</b>{expires_line}\n"
+        f"🔎 سقف جستجوی روزانه: {quota_line}\n"
+        f"📈 مجموع کل جستجوهای شما: <b>{stats['user_searches']}</b>\n"
+        f"🗂 مقالات کش‌شده در پایگاه: <b>{stats['total_cached_papers']}</b>"
+    )
+    await safe_send_message(callback.message, text[:4000])
 
 
 @router.callback_query(F.data == "send_receipt_guide")
@@ -548,14 +664,38 @@ async def handle_search_query(message: Message):
         return
 
     if message.from_user:
-        # Rate limit check: max 25 searches per minute
-        if await db.check_rate_limit(message.from_user.id, max_per_minute=25):
+        user_id = message.from_user.id
+        # 1. Anti-spam check: max 25 searches per minute
+        if await db.check_rate_limit(user_id, max_per_minute=25):
             await safe_send_message(
                 message,
                 "⚠️ <b>تعداد درخواست‌های شما بیش از حد مجاز است.</b>\nلطفاً لحظاتی بعد مجدداً امتحان کنید."
             )
             return
-        await db.log_search(message.from_user.id, query)
+
+        # 2. Daily search quota check for regular (non-premium) users (10 searches / 24 hours)
+        is_premium = await db.is_user_premium(user_id)
+        if not is_premium:
+            recent_searches = await db.get_user_recent_search_count(user_id, hours=24)
+            if recent_searches >= settings.DAILY_SEARCH_LIMIT:
+                limit_text = (
+                    "⚠️ <b>سقف مجاز جستجوی روزانه شما تکمیل شده است!</b>\n\n"
+                    f"کاربران عادی مجاز به <b>{settings.DAILY_SEARCH_LIMIT} جستجو در هر ۲۴ ساعت</b> هستند.\n"
+                    f"تعداد جستجوهای انجام‌شده توسط شما در ۲۴ ساعت اخیر: <b>{recent_searches} از {settings.DAILY_SEARCH_LIMIT}</b> ❌\n\n"
+                    "💎 <b>برای جستجوی نامحدود چه کار کنم؟</b>\n"
+                    "با تهیه <b>اشتراک ویژه</b>، سقف روزانه برداشته شده و جستجوی شما <b>کاملاً نامحدود</b> می‌شود. همچنین به امکانات زیر دسترسی خواهید داشت:\n"
+                    "• 🔍 جستجوی کاملاً نامحدود و بدون سقف ۲۴ ساعته\n"
+                    "• 🇮🇷 ترجمه روان و نامحدود فارسی چکیده و تایتل مقالات\n"
+                    "• 📄 مشاهده صفحات بعدی و دریافت بیش از ۲۰ نتیجه\n"
+                    "• ⭐️ ذخیره در کتابخانه شخصی (/saved) با خروجی‌های متنوع\n"
+                    "• 📎 دریافت رفرنس‌های علمی استاندارد و مقالات مرتبط\n\n"
+                    "💳 برای ارتقا به اشتراک ویژه، دستور /subscribe را ارسال کنید یا دکمه‌های زیر را لمس نمایید:"
+                )
+                kb = build_subscription_keyboard()
+                await safe_send_message(message, limit_text, reply_markup=kb)
+                return
+
+        await db.log_search(user_id, query)
 
     # Batch DOI detection: if message contains 2+ DOIs, handle them together
     dois = extract_multiple_dois(query)

@@ -132,6 +132,17 @@ class Database:
                     count = row[0] if row else 0
                     return count >= max_per_minute
 
+    async def get_user_recent_search_count(self, user_id: int, hours: int = 24) -> int:
+        """Return number of searches conducted by user in the past `hours` (default 24 hours)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                f"""SELECT COUNT(*) FROM search_logs
+                   WHERE user_id = ? AND created_at >= datetime('now', '-{hours} hours')""",
+                (user_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return row[0] if row else 0
+
     async def log_search(self, user_id: int, query: str):
         async with self.lock:
             async with aiosqlite.connect(self.db_path) as db:
@@ -256,7 +267,8 @@ class Database:
     # ── Premium Subscription & Receipts Methods ──────────────────────
 
     async def set_user_premium(self, user_id: int, status: int = 1, days: int = 30):
-        """Activate premium subscription for specified days (default 30) or deactivate."""
+        """Activate premium subscription for specified days (default 30) or deactivate.
+        If user already has an active subscription, new days are appended to current expiration."""
         async with self.lock:
             async with aiosqlite.connect(self.db_path) as db:
                 if status == 1:
@@ -265,8 +277,12 @@ class Database:
                         VALUES (?, 1, datetime('now', ?))
                         ON CONFLICT(user_id) DO UPDATE SET
                             is_premium = 1,
-                            premium_expires_at = datetime('now', ?)
-                    """, (user_id, f"+{days} days", f"+{days} days"))
+                            premium_expires_at = CASE
+                                WHEN premium_expires_at IS NOT NULL AND premium_expires_at > datetime('now')
+                                THEN datetime(premium_expires_at, ?)
+                                ELSE datetime('now', ?)
+                            END
+                    """, (user_id, f"+{days} days", f"+{days} days", f"+{days} days"))
                 else:
                     await db.execute("""
                         UPDATE users SET is_premium = 0, premium_expires_at = NULL WHERE user_id = ?
@@ -282,24 +298,78 @@ class Database:
             """, (user_id,)) as cursor:
                 return (await cursor.fetchone()) is not None
 
-    async def get_user_premium_info(self, user_id: int) -> tuple[bool, Optional[str]]:
-        """Return tuple (is_active, premium_expires_at)."""
+    async def get_user_subscription_details(self, user_id: int) -> dict:
+        """Return dict with subscription status, expiration datetime, and remaining days/hours."""
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute("""
                 SELECT is_premium, premium_expires_at FROM users WHERE user_id = ?
             """, (user_id,)) as cursor:
                 row = await cursor.fetchone()
                 if not row:
-                    return False, None
+                    return {
+                        "is_active": False,
+                        "is_lifetime": False,
+                        "expires_at": None,
+                        "remaining_days": 0,
+                        "remaining_hours": 0,
+                        "total_hours": 0.0,
+                    }
+
                 is_prem, expires_at = row[0], row[1]
                 if not is_prem:
-                    return False, None
+                    return {
+                        "is_active": False,
+                        "is_lifetime": False,
+                        "expires_at": expires_at,
+                        "remaining_days": 0,
+                        "remaining_hours": 0,
+                        "total_hours": 0.0,
+                    }
+
+                # If lifetime (is_premium=1, premium_expires_at=NULL)
+                if expires_at is None:
+                    return {
+                        "is_active": True,
+                        "is_lifetime": True,
+                        "expires_at": None,
+                        "remaining_days": -1,
+                        "remaining_hours": -1,
+                        "total_hours": -1.0,
+                    }
+
+                # Check expiration against UTC now
                 async with db.execute("""
-                    SELECT 1 FROM users
-                    WHERE user_id = ? AND is_premium = 1 AND (premium_expires_at IS NULL OR premium_expires_at > datetime('now'))
+                    SELECT (julianday(premium_expires_at) - julianday('now')) * 24 FROM users
+                    WHERE user_id = ? AND is_premium = 1 AND premium_expires_at > datetime('now')
                 """, (user_id,)) as exp_cursor:
-                    is_active = (await exp_cursor.fetchone()) is not None
-                    return is_active, expires_at
+                    exp_row = await exp_cursor.fetchone()
+                    if not exp_row:
+                        return {
+                            "is_active": False,
+                            "is_lifetime": False,
+                            "expires_at": expires_at,
+                            "remaining_days": 0,
+                            "remaining_hours": 0,
+                            "total_hours": 0.0,
+                            "is_expired": True,
+                        }
+
+                    total_hours = max(0.0, float(exp_row[0]))
+                    days = int(total_hours // 24)
+                    hours = int(total_hours % 24)
+                    return {
+                        "is_active": True,
+                        "is_lifetime": False,
+                        "expires_at": expires_at,
+                        "remaining_days": days,
+                        "remaining_hours": hours,
+                        "total_hours": total_hours,
+                    }
+
+    async def get_user_premium_info(self, user_id: int) -> tuple[bool, Optional[str]]:
+        """Return tuple (is_active, premium_expires_at) for backwards compatibility."""
+        details = await self.get_user_subscription_details(user_id)
+        return details["is_active"], details["expires_at"]
 
     async def add_pending_receipt(self, user_id: int):
         """Add user to pending receipts table waiting for receipt upload."""
@@ -344,8 +414,11 @@ class Database:
                         is_premium = True
                         premium_expires = user_row[2]
 
+            recent_searches = await self.get_user_recent_search_count(user_id, hours=24)
             return {
                 "user_searches": user_row[0] if user_row else 0,
+                "recent_searches_24h": recent_searches,
+                "daily_limit": settings.DAILY_SEARCH_LIMIT,
                 "total_cached_papers": cache_row[0] if cache_row else 0,
                 "is_premium": is_premium,
                 "premium_expires_at": premium_expires

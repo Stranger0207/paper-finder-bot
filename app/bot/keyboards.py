@@ -148,7 +148,7 @@ def build_saved_library_keyboard(papers: list[PaperItem]) -> InlineKeyboardMarku
 
 
 def build_subscription_keyboard() -> InlineKeyboardMarkup:
-    """Build keyboard for premium subscription options."""
+    """Build keyboard for premium subscription options (for users without active subscription)."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="💳 خرید اشتراک ویژه (۵۰,۰۰۰ تومان)", callback_data="buy_sub")
@@ -158,6 +158,19 @@ def build_subscription_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="📊 وضعیت اشتراک من", callback_data="check_sub_status")
+        ]
+    ])
+
+
+def build_active_subscription_keyboard() -> InlineKeyboardMarkup:
+    """Build keyboard for users who already possess an active premium subscription."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📚 کتابخانه شخصی من (/saved)", callback_data="sub_lib"),
+            InlineKeyboardButton(text="📊 آمار فعالیت (/stats)", callback_data="sub_stats")
+        ],
+        [
+            InlineKeyboardButton(text="🔄 تمدید اشتراک ویژه", callback_data="renew_sub")
         ]
     ])
 
